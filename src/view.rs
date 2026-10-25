@@ -1,6 +1,5 @@
 //! Fit, zoom, and pan. Scale is physical pixels per image pixel.
 
-pub const MIN_SCALE: f32 = 0.05;
 pub const MAX_SCALE: f32 = 32.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,13 +52,31 @@ impl View {
     }
 
     /// Wheel zoom. The image point under `cursor` stays under the cursor.
-    /// Fit may sit outside the clamp; the clamp applies to this change.
-    pub fn zoom_at(&mut self, cursor: Vec2, factor: f32) {
+    /// Zoom-out stops at the fitted size, so the picture never becomes
+    /// smaller than the window on both axes. Zoom-in stops at `MAX_SCALE`.
+    pub fn zoom_at(&mut self, cursor: Vec2, factor: f32, image: Vec2, window: Vec2) {
         if !factor.is_finite() || factor <= 0.0 {
             return;
         }
+        let (fit_scale, _) = fit_transform(image, window);
+        if !fit_scale.is_finite() || fit_scale <= 0.0 {
+            return;
+        }
+        let raw = self.scale * factor;
+        if factor < 1.0 {
+            if self.scale <= fit_scale {
+                return;
+            }
+            if raw <= fit_scale {
+                self.fit(image, window);
+                return;
+            }
+        }
+        let scale = raw.min(MAX_SCALE.max(fit_scale));
+        if (scale - self.scale).abs() <= 1e-4 * self.scale.max(1.0) {
+            return;
+        }
         let image_point = self.image_point(cursor);
-        let scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
         self.scale = scale;
         self.pan = Vec2::new(
             cursor.x - image_point.x * scale,
@@ -142,8 +159,10 @@ mod tests {
         let mut view = View::new();
         view.fit(Vec2::new(100.0, 50.0), Vec2::new(200.0, 200.0));
         let cursor = Vec2::new(10.0, 60.0);
+        let image = Vec2::new(100.0, 50.0);
+        let window = Vec2::new(200.0, 200.0);
         let before = view.image_point(cursor);
-        view.zoom_at(cursor, 1.1);
+        view.zoom_at(cursor, 1.1, image, window);
         let after = view.image_point(cursor);
         assert!(close(before.x, after.x));
         assert!(close(before.y, after.y));
@@ -158,7 +177,7 @@ mod tests {
         view.fitted = false;
         let cursor = Vec2::new(40.0, 20.0);
         let before = view.image_point(cursor);
-        view.zoom_at(cursor, 4.0);
+        view.zoom_at(cursor, 4.0, Vec2::new(10.0, 10.0), Vec2::new(10.0, 10.0));
         assert!(close(view.scale, MAX_SCALE));
         let after = view.image_point(cursor);
         assert!(close(before.x, after.x));
@@ -191,7 +210,7 @@ mod tests {
         assert!(view.fitted);
         assert!(close(view.scale, 3.0));
 
-        view.zoom_at(Vec2::new(150.0, 150.0), 2.0);
+        view.zoom_at(Vec2::new(150.0, 150.0), 2.0, image, Vec2::new(300.0, 300.0));
         let scale = view.scale;
         let center = view.image_point(Vec2::new(150.0, 150.0));
         view.on_resize(
@@ -204,5 +223,38 @@ mod tests {
         let center_after = view.image_point(Vec2::new(200.0, 100.0));
         assert!(close(center.x, center_after.x));
         assert!(close(center.y, center_after.y));
+    }
+
+    #[test]
+    fn zoom_out_stops_when_the_image_fits_the_window() {
+        let image = Vec2::new(400.0, 200.0);
+        let window = Vec2::new(200.0, 200.0);
+        let mut view = View::new();
+        view.fit(image, window);
+
+        view.zoom_at(Vec2::new(20.0, 20.0), 0.5, image, window);
+        assert!(view.fitted);
+        assert!(close(view.scale, 0.5));
+        assert!(close(view.pan.y, 50.0));
+
+        let cursor = Vec2::new(40.0, 80.0);
+        view.zoom_at(cursor, 3.0, image, window);
+        assert!(!view.fitted);
+        let before = view.image_point(cursor);
+        view.zoom_at(cursor, 0.8, image, window);
+        assert!(!view.fitted);
+        assert!(view.scale > 0.5);
+        let after = view.image_point(cursor);
+        assert!(close(before.x, after.x));
+        assert!(close(before.y, after.y));
+
+        view.zoom_at(Vec2::new(10.0, 190.0), 0.1, image, window);
+        assert!(view.fitted);
+        assert!(close(view.scale, 0.5));
+        let displayed_w = image.x * view.scale;
+        let displayed_h = image.y * view.scale;
+        assert!(displayed_w <= window.x + 1e-3);
+        assert!(displayed_h <= window.y + 1e-3);
+        assert!(displayed_w + 1e-3 >= window.x || displayed_h + 1e-3 >= window.y);
     }
 }

@@ -70,7 +70,7 @@ Alphabetical means the file name only, compared with case-insensitive ordinal or
 Zoom is a scale against physical pixels. Scale `1.0` means one image pixel covers one physical pixel.
 
 - On open, on resize, on fullscreen toggle, and on every image change, the image is fitted inside the window (the whole picture is visible, aspect ratio preserved, centered).
-- The first wheel step or drag leaves fit mode. Further resize and fullscreen changes keep the current scale and the image point at the center of the window.
+- The first zoom-in or drag leaves fit mode. Zoom-out while the image already fits the window does nothing. Further resize and fullscreen changes keep the current scale and the image point at the center of the window.
 - Each wheel detent multiplies or divides the scale by `1.1`. The point under the cursor stays under the cursor:
 
   ```
@@ -79,7 +79,7 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
   pan = cursor - image_point * scale
   ```
 
-- Wheel zoom clamps the scale to `0.05` … `32` physical pixels per image pixel. Fit may use a scale outside that range when that is what keeps the whole image visible.
+- Zoom-in stops at 32 physical pixels per image pixel. Zoom-out stops at the fit scale. Past that, the picture would be smaller than the window on both axes, so the wheel returns it to the centered fit instead. Fit may still scale a very small image past 32 so the whole picture stays visible; the wheel cannot zoom out from there.
 - The left button pans. Movement matches the cursor 1:1 in screen pixels. There is no inertia and no edge clamp; the picture may leave the viewport.
 - The right button does nothing. Double-click does nothing.
 
@@ -158,7 +158,7 @@ src/app.rs
 - Left and Right move in case-insensitive alphabetical order and stop at the ends.
 - Files that are not `.jpg`, `.jpeg`, or `.png` are absent from the sequence. A JPEG in a subfolder is absent.
 - Enter toggles borderless fullscreen on the current monitor. Escape leaves fullscreen and does not quit. Escape in the window quits.
-- The wheel keeps the image point under the cursor fixed, including when the pointer is near a corner and when the image is smaller than the window.
+- The wheel keeps the image point under the cursor fixed, including when the pointer is near a corner and when the image is letterboxed. Zoom-out stops once the image fits the window.
 - Dragging pans without changing scale. Resizing while still fitted refits. Resizing after a zoom keeps the scale.
 - Delete then Escape does not change the file. Delete then Enter moves it to the Recycle Bin, shows the next image, and skips the removed file. Deleting the last remaining image exits.
 - A phone JPEG with orientation 6 is shown rotated upright.

@@ -452,8 +452,15 @@ impl ApplicationHandler<UserEvent> for App {
                 if steps == 0.0 {
                     return;
                 }
-                self.view
-                    .zoom_at(self.cursor_or_center(), 1.1_f32.powf(steps));
+                let Some(image) = self.image_size() else {
+                    return;
+                };
+                self.view.zoom_at(
+                    self.cursor_or_center(),
+                    1.1_f32.powf(steps),
+                    image,
+                    self.window_size,
+                );
                 self.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
