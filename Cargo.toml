@@ -5,6 +5,7 @@ edition = "2021"
 description = "A small photo viewer for Windows"
 license = "MIT"
 publish = false
+build = "build.rs"
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
@@ -15,3 +16,6 @@ pollster = "0.4"
 trash = "5"
 wgpu = "30"
 winit = "0.30.13"
+
+[build-dependencies]
+winresource = "0.1"

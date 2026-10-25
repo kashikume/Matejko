@@ -10,8 +10,8 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::windows::MonitorHandleExtWindows;
-use winit::window::{Fullscreen, Window};
+use winit::platform::windows::{MonitorHandleExtWindows, WindowAttributesExtWindows};
+use winit::window::{Fullscreen, Icon, Window};
 
 use crate::catalog::Catalog;
 use crate::decode::{DecodedImage, Decoder, UserEvent};
@@ -529,11 +529,14 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let (position, size) = initial_placement(event_loop);
+        let icon = app_icon();
         let attributes = Window::default_attributes()
             .with_title(self.catalog.title())
             .with_inner_size(size)
             .with_position(position)
-            .with_resizable(true);
+            .with_resizable(true)
+            .with_window_icon(icon.clone())
+            .with_taskbar_icon(icon);
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -794,6 +797,15 @@ fn cursor_screen_position() -> Option<(i32, i32)> {
     } else {
         Some((point.x, point.y))
     }
+}
+
+fn app_icon() -> Option<Icon> {
+    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .ok()?
+        .into_rgba8();
+    let width = image.width();
+    let height = image.height();
+    Icon::from_rgba(image.into_raw(), width, height).ok()
 }
 
 #[cfg(test)]

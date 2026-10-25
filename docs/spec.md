@@ -59,7 +59,7 @@ Alphabetical means the file name only, compared with case-insensitive ordinal or
 
 ### What the window shows
 
-- The app starts windowed, centered, using about 80% of the work area on the monitor that contains the window.
+- The app starts windowed, centered, using about 80% of the work area on the monitor that contains the window. The window and the `.exe` use the Matejko painter icon.
 - The background is black. PNG transparency is composited onto black.
 - The title bar shows `Matejko — name.jpg (3 / 40) — F1 for help`. There is no other overlay during normal viewing.
 - The window is resizable and has the usual minimize, maximize, and close controls. Close and Alt+F4 quit immediately, including during help or delete confirmation.
