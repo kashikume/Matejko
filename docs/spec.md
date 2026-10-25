@@ -127,7 +127,7 @@ Windows only, Rust, one binary. The `windows` subsystem is used so opening the a
 
 Crates:
 
-- `winit` for the window, keyboard, mouse, and fullscreen.
+- `winit` for the window, keyboard, mouse, and fullscreen. The crate is patched past 0.30.13 so dragging onto a monitor with a different DPI (often the screen above or below) does not grow the window in a loop.
 - `wgpu` to draw one textured quad. This is what keeps wheel zoom and dragging on the GPU.
 - `image` with only the JPEG and PNG features.
 - `glyphon` for the delete confirmation and decode errors, so file names keep their Unicode characters.

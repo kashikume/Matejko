@@ -263,8 +263,10 @@ impl Gpu {
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.config.width = size.width.max(1);
-        self.config.height = size.height.max(1);
+        // Cap to the device limit so a mixed-DPI drag that still reports a
+        // huge size cannot ask wgpu for a surface larger than it allows.
+        self.config.width = size.width.clamp(1, self.max_edge);
+        self.config.height = size.height.clamp(1, self.max_edge);
         self.surface.configure(&self.device, &self.config);
     }
 
