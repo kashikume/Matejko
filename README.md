@@ -14,6 +14,7 @@ The window title shows the file name and its place in the folder.
 - Enter — switch between a window and fullscreen
 - Delete, then Enter — move the current image to the Recycle Bin
 - Escape — cancel a delete, leave fullscreen, or quit
+- F1 — show these keys
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 

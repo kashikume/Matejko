@@ -24,11 +24,13 @@ pub enum Command {
     Enter,
     Delete,
     Escape,
+    Help,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Viewing { fullscreen: bool },
+    Help,
     Confirming,
     DeleteFailed,
 }
@@ -43,6 +45,7 @@ pub enum Action {
     Quit,
     AskDelete,
     DoDelete,
+    ShowHelp,
     CancelOverlay,
 }
 
@@ -58,12 +61,25 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::Delete) => Action::AskDelete,
         (Mode::Viewing { fullscreen: true }, Command::Escape) => Action::LeaveFullscreen,
         (Mode::Viewing { fullscreen: false }, Command::Escape) => Action::Quit,
+        (Mode::Viewing { .. }, Command::Help) => Action::ShowHelp,
+        (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Confirming, Command::Enter) => Action::DoDelete,
         (Mode::Confirming, Command::Escape) => Action::CancelOverlay,
         (Mode::DeleteFailed, Command::Escape) => Action::CancelOverlay,
-        (Mode::Confirming | Mode::DeleteFailed, _) => Action::None,
+        (Mode::Help | Mode::Confirming | Mode::DeleteFailed, _) => Action::None,
     }
 }
+
+const HELP_TEXT: &str = "\
+Left / Right — previous or next image
+Enter — window or fullscreen
+Delete — delete the image
+Escape — cancel, leave fullscreen, or quit
+F1 — help
+Mouse wheel — zoom at the pointer
+Drag — pan
+
+Esc or F1 to close";
 
 enum CacheEntry {
     Ready(DecodedImage),
@@ -72,6 +88,7 @@ enum CacheEntry {
 
 enum Confirm {
     Idle,
+    Help,
     Prompt,
     Failed(String),
 }
@@ -145,6 +162,7 @@ impl App {
             .and_then(|window| window.fullscreen())
             .is_some();
         match self.confirm {
+            Confirm::Help => Mode::Help,
             Confirm::Prompt => Mode::Confirming,
             Confirm::Failed(_) => Mode::DeleteFailed,
             Confirm::Idle => Mode::Viewing { fullscreen },
@@ -161,6 +179,10 @@ impl App {
             Action::Quit => event_loop.exit(),
             Action::AskDelete => {
                 self.confirm = Confirm::Prompt;
+                self.request_redraw();
+            }
+            Action::ShowHelp => {
+                self.confirm = Confirm::Help;
                 self.request_redraw();
             }
             Action::DoDelete => self.delete_current(event_loop),
@@ -336,6 +358,7 @@ impl App {
         }
         let name = self.catalog.file_name();
         match &self.confirm {
+            Confirm::Help => Some(HELP_TEXT.to_string()),
             Confirm::Prompt => Some(format!(
                 "Delete \"{name}\"?\nEnter to delete, Esc to cancel"
             )),
@@ -519,6 +542,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::Enter) => Some(Command::Enter),
         Key::Named(NamedKey::Delete) => Some(Command::Delete),
         Key::Named(NamedKey::Escape) => Some(Command::Escape),
+        Key::Named(NamedKey::F1) => Some(Command::Help),
         _ => None,
     }
 }
@@ -645,6 +669,22 @@ mod tests {
         );
         assert_eq!(
             action_for(Command::Enter, Mode::DeleteFailed, false),
+            Action::None
+        );
+        assert_eq!(action_for(Command::Help, viewing, false), Action::ShowHelp);
+        assert_eq!(action_for(Command::Help, viewing, true), Action::None);
+        assert_eq!(
+            action_for(Command::Help, Mode::Help, false),
+            Action::CancelOverlay
+        );
+        assert_eq!(
+            action_for(Command::Escape, Mode::Help, false),
+            Action::CancelOverlay
+        );
+        assert_eq!(action_for(Command::Enter, Mode::Help, false), Action::None);
+        assert_eq!(action_for(Command::Delete, Mode::Help, false), Action::None);
+        assert_eq!(
+            action_for(Command::Help, Mode::Confirming, false),
             Action::None
         );
     }

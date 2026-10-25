@@ -61,8 +61,8 @@ Alphabetical means the file name only, compared with case-insensitive ordinal or
 
 - The app starts windowed, centered, using about 80% of the work area on the monitor that contains the window.
 - The background is black. PNG transparency is composited onto black.
-- The title bar shows `Matejko — name.jpg (3 / 40)`. There is no other overlay during normal viewing.
-- The window is resizable and has the usual minimize, maximize, and close controls. Close and Alt+F4 quit immediately, including during delete confirmation.
+- The title bar shows `Matejko — name.jpg (3 / 40) — F1 for help`. There is no other overlay during normal viewing.
+- The window is resizable and has the usual minimize, maximize, and close controls. Close and Alt+F4 quit immediately, including during help or delete confirmation.
 - Fullscreen is borderless on the monitor that contains the window. The title bar is not visible there, so the file name is hidden until the user leaves fullscreen.
 
 ### Fitting, zoom, and pan
@@ -85,15 +85,20 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 
 ### Keyboard
 
-| Input | Viewing | Delete confirmation |
-| --- | --- | --- |
-| Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored |
-| Enter | Toggle fullscreen | Confirm delete |
-| Delete | Open confirmation | Ignored |
-| Escape | Leave fullscreen if fullscreen, otherwise quit | Cancel |
-| Close, Alt+F4 | Quit | Quit |
+| Input | Viewing | Help | Delete confirmation |
+| --- | --- | --- | --- |
+| Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored |
+| Enter | Toggle fullscreen | Ignored | Confirm delete |
+| Delete | Open confirmation | Ignored | Ignored |
+| F1 | Open help | Close help | Ignored |
+| Escape | Leave fullscreen if fullscreen, otherwise quit | Close help | Cancel |
+| Close, Alt+F4 | Quit | Quit | Quit |
 
-Mouse wheel and drag keep working during delete confirmation, so the user can still see the picture they are about to remove.
+Mouse wheel and drag keep working during help and delete confirmation, so the picture stays visible behind the text.
+
+### Help
+
+F1 dims the picture and draws the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
 
 ### Delete flow
 
