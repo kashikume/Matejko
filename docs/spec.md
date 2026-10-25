@@ -86,20 +86,25 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 
 ### Keyboard
 
-| Input | Viewing | Help | Delete confirmation |
+| Input | Viewing | Help / Info | Delete confirmation |
 | --- | --- | --- | --- |
 | Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored |
 | Enter | Toggle fullscreen | Ignored | Confirm delete |
 | Delete | Open confirmation | Ignored | Ignored |
-| F1 | Open help | Close help | Ignored |
-| Escape | Leave fullscreen if fullscreen, otherwise quit | Close help | Cancel |
+| I | Open image information | Close info if info is open; otherwise ignored | Ignored |
+| F1 | Open help | Close help if help is open; otherwise ignored | Ignored |
+| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel |
 | Close, Alt+F4 | Quit | Quit | Quit |
 
-Mouse wheel and drag keep working during help and delete confirmation, so the picture stays visible behind the text.
+Mouse wheel and drag keep working during help, info, and delete confirmation, so the picture stays visible behind the text.
 
 ### Help
 
 F1 dims the picture and draws the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
+
+### Information
+
+I dims the picture and draws a summary for the current file: name, folder, file size, modified and created times, format, oriented pixel size, and available EXIF (camera, lens, taken time, exposure, focal length, flash, orientation, software, artist, copyright, GPS when present). Escape or I closes it and does not quit. I is ignored during delete confirmation and while help is open.
 
 ### Delete flow
 
@@ -118,7 +123,7 @@ F1 dims the picture and draws the key list in the center, in the same way as the
 ### Known limitations
 
 - Very large images are fully decoded. A 24 megapixel photo is on the order of 100 MB of RGBA. There is no tiled viewer and no memory cap in the first version.
-- ICC profiles, GPS, and other metadata are ignored beyond EXIF orientation.
+- ICC profiles are ignored. GPS and other EXIF tags appear only in the information overlay; they are not used for viewing.
 - Preload does not cross a gap created by a file that is slow to decode; the visible file is always requested first.
 
 ## Technical approach
@@ -130,7 +135,8 @@ Crates:
 - `winit` for the window, keyboard, mouse, and fullscreen. The crate is patched past 0.30.13 so dragging onto a monitor with a different DPI (often the screen above or below) does not grow the window in a loop.
 - `wgpu` to draw one textured quad. This is what keeps wheel zoom and dragging on the GPU.
 - `image` with only the JPEG and PNG features.
-- `glyphon` for the delete confirmation and decode errors, so file names keep their Unicode characters.
+- `kamadak-exif` for the information overlay.
+- `glyphon` for the delete confirmation, help, info, and decode errors, so file names keep their Unicode characters.
 - `trash` to send files to the Recycle Bin.
 
 `wgpu` makes the executable several megabytes. That is accepted in exchange for smooth zoom. A software blit would be smaller and slower to pan on large photos.
@@ -142,6 +148,7 @@ Crates:
 - `view` — fit, zoom-at-point, pan, and whether the view is still in fit mode.
 - `decode` — background JPEG/PNG decode and EXIF orientation.
 - `gpu` — device, swapchain, texture upload, draw.
+- `info` — file and EXIF text for the information overlay.
 - `app` — event loop, input, confirmation state.
 
 `catalog` and `view` stay free of `winit` and `wgpu` so the sort, neighbor, delete-index, and zoom math can be unit tested.

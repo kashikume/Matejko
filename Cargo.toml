@@ -9,7 +9,9 @@ build = "build.rs"
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
+exif = { version = "0.6.1", package = "kamadak-exif" }
 glyphon = "0.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pollster = "0.4"

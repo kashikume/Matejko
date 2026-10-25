@@ -15,6 +15,7 @@ The window title shows the file name and its place in the folder.
 - Delete, then Enter — move the current image to the Recycle Bin
 - Escape — cancel a delete, leave fullscreen, or quit
 - F1 — show these keys
+- I — show file and EXIF information
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 

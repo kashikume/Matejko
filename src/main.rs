@@ -4,6 +4,7 @@ mod app;
 mod catalog;
 mod decode;
 mod gpu;
+mod info;
 mod view;
 
 use std::path::Path;

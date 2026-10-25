@@ -16,6 +16,7 @@ use winit::window::{Fullscreen, Icon, Window};
 use crate::catalog::Catalog;
 use crate::decode::{DecodedImage, Decoder, UserEvent};
 use crate::gpu::{Frame, Gpu};
+use crate::info::format_image_info;
 use crate::view::{Vec2, View};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,12 +27,14 @@ pub enum Command {
     Delete,
     Escape,
     Help,
+    Info,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Viewing { fullscreen: bool },
     Help,
+    Info,
     Confirming,
     DeleteFailed,
 }
@@ -47,6 +50,7 @@ pub enum Action {
     AskDelete,
     DoDelete,
     ShowHelp,
+    ShowInfo,
     CancelOverlay,
 }
 
@@ -63,11 +67,13 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { fullscreen: true }, Command::Escape) => Action::LeaveFullscreen,
         (Mode::Viewing { fullscreen: false }, Command::Escape) => Action::Quit,
         (Mode::Viewing { .. }, Command::Help) => Action::ShowHelp,
+        (Mode::Viewing { .. }, Command::Info) => Action::ShowInfo,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
+        (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
         (Mode::Confirming, Command::Enter) => Action::DoDelete,
         (Mode::Confirming, Command::Escape) => Action::CancelOverlay,
         (Mode::DeleteFailed, Command::Escape) => Action::CancelOverlay,
-        (Mode::Help | Mode::Confirming | Mode::DeleteFailed, _) => Action::None,
+        (Mode::Help | Mode::Info | Mode::Confirming | Mode::DeleteFailed, _) => Action::None,
     }
 }
 
@@ -75,6 +81,7 @@ const HELP_TEXT: &str = "\
 Left / Right — previous or next image
 Enter — window or fullscreen
 Delete — delete the image
+I — image information
 Escape — cancel, leave fullscreen, or quit
 F1 — help
 Mouse wheel — zoom at the pointer
@@ -150,6 +157,7 @@ enum CacheEntry {
 enum Confirm {
     Idle,
     Help,
+    Info,
     Prompt,
     Failed(String),
 }
@@ -233,6 +241,7 @@ impl App {
             .is_some();
         match self.confirm {
             Confirm::Help => Mode::Help,
+            Confirm::Info => Mode::Info,
             Confirm::Prompt => Mode::Confirming,
             Confirm::Failed(_) => Mode::DeleteFailed,
             Confirm::Idle => Mode::Viewing { fullscreen },
@@ -253,6 +262,10 @@ impl App {
             }
             Action::ShowHelp => {
                 self.confirm = Confirm::Help;
+                self.request_redraw();
+            }
+            Action::ShowInfo => {
+                self.confirm = Confirm::Info;
                 self.request_redraw();
             }
             Action::DoDelete => self.delete_current(event_loop),
@@ -494,6 +507,13 @@ impl App {
         let name = self.catalog.file_name();
         match &self.confirm {
             Confirm::Help => Some(HELP_TEXT.to_string()),
+            Confirm::Info => {
+                let path = self.catalog.current_path();
+                let pixels = self
+                    .image_size()
+                    .map(|size| (size.x.round() as u32, size.y.round() as u32));
+                Some(format_image_info(&path, pixels))
+            }
             Confirm::Prompt => Some(format!(
                 "Delete \"{name}\"?\nEnter to delete, Esc to cancel"
             )),
@@ -703,6 +723,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::Delete) => Some(Command::Delete),
         Key::Named(NamedKey::Escape) => Some(Command::Escape),
         Key::Named(NamedKey::F1) => Some(Command::Help),
+        Key::Character(ch) if ch.eq_ignore_ascii_case("i") => Some(Command::Info),
         _ => None,
     }
 }
@@ -872,6 +893,23 @@ mod tests {
             action_for(Command::Help, Mode::Confirming, false),
             Action::None
         );
+        assert_eq!(action_for(Command::Info, viewing, false), Action::ShowInfo);
+        assert_eq!(action_for(Command::Info, viewing, true), Action::None);
+        assert_eq!(
+            action_for(Command::Info, Mode::Info, false),
+            Action::CancelOverlay
+        );
+        assert_eq!(
+            action_for(Command::Escape, Mode::Info, false),
+            Action::CancelOverlay
+        );
+        assert_eq!(action_for(Command::Enter, Mode::Info, false), Action::None);
+        assert_eq!(
+            action_for(Command::Info, Mode::Confirming, false),
+            Action::None
+        );
+        assert_eq!(action_for(Command::Info, Mode::Help, false), Action::None);
+        assert_eq!(action_for(Command::Help, Mode::Info, false), Action::None);
     }
 
     #[test]
