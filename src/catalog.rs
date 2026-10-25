@@ -1,0 +1,253 @@
+//! The JPEG and PNG files in one folder, in case-insensitive ordinal order.
+
+use std::cmp::Ordering;
+use std::ffi::OsStr;
+use std::fs;
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CompareStringOrdinal(
+        string1: *const u16,
+        count1: i32,
+        string2: *const u16,
+        count2: i32,
+        ignore_case: i32,
+    ) -> i32;
+}
+
+#[derive(Debug)]
+pub struct Catalog {
+    paths: Vec<PathBuf>,
+    index: usize,
+}
+
+impl Catalog {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Err(format!("Couldn't find {}.", path.display()));
+        }
+        if path.is_dir() {
+            return Err("Matejko opens an image file. Pass a JPEG or PNG, not a folder.".into());
+        }
+        if !path.is_file() {
+            return Err(format!("{} is not a file.", path.display()));
+        }
+        if !is_supported(path) {
+            return Err("Matejko opens JPEG and PNG files only.".into());
+        }
+
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let entries = fs::read_dir(parent)
+            .map_err(|err| format!("Couldn't read {}: {err}", parent.display()))?;
+
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("Couldn't read {}: {err}", parent.display()))?;
+            let candidate = entry.path();
+            if !is_supported(&candidate) {
+                continue;
+            }
+            let is_file = entry
+                .metadata()
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false);
+            if is_file {
+                paths.push(candidate);
+            }
+        }
+
+        paths.sort_by(|left, right| cmp_file_names(left, right));
+        let index = paths
+            .iter()
+            .position(|candidate| file_names_equal(candidate, path))
+            .ok_or_else(|| format!("Couldn't find {} in its folder.", path.display()))?;
+        Ok(Self { paths, index })
+    }
+
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn current_path(&self) -> PathBuf {
+        self.paths[self.index].clone()
+    }
+
+    pub fn file_name(&self) -> String {
+        file_name(&self.paths[self.index])
+    }
+
+    pub fn title(&self) -> String {
+        format!(
+            "Matejko — {} ({} / {})",
+            self.file_name(),
+            self.index() + 1,
+            self.len()
+        )
+    }
+
+    pub fn neighbor(&self, delta: isize) -> Option<&Path> {
+        let next = self.index as isize + delta;
+        if next < 0 || next >= self.paths.len() as isize {
+            None
+        } else {
+            Some(&self.paths[next as usize])
+        }
+    }
+
+    /// Move to the previous (`-1`) or next (`1`) image. Stops at either end.
+    pub fn move_by(&mut self, delta: isize) -> bool {
+        let next = self.index as isize + delta;
+        if next < 0 || next >= self.paths.len() as isize {
+            return false;
+        }
+        self.index = next as usize;
+        true
+    }
+
+    /// Drop the current path. The index then points at the next file, or the
+    /// new last file when the deleted one was at the end.
+    pub fn remove_current(&mut self) -> PathBuf {
+        let path = self.paths.remove(self.index);
+        if self.index == self.paths.len() && self.index > 0 {
+            self.index -= 1;
+        }
+        path
+    }
+}
+
+pub fn is_supported(path: &Path) -> bool {
+    let Some(extension) = path.extension() else {
+        return false;
+    };
+    extension.eq_ignore_ascii_case("jpg")
+        || extension.eq_ignore_ascii_case("jpeg")
+        || extension.eq_ignore_ascii_case("png")
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn cmp_file_names(left: &Path, right: &Path) -> Ordering {
+    cmp_ordinal_ignore_case(
+        left.file_name().unwrap_or(OsStr::new("")),
+        right.file_name().unwrap_or(OsStr::new("")),
+    )
+}
+
+fn file_names_equal(left: &Path, right: &Path) -> bool {
+    cmp_file_names(left, right) == Ordering::Equal
+}
+
+fn cmp_ordinal_ignore_case(left: &OsStr, right: &OsStr) -> Ordering {
+    let left: Vec<u16> = left.encode_wide().collect();
+    let right: Vec<u16> = right.encode_wide().collect();
+    let result = unsafe {
+        CompareStringOrdinal(
+            left.as_ptr(),
+            left.len() as i32,
+            right.as_ptr(),
+            right.len() as i32,
+            1,
+        )
+    };
+    match result {
+        1 => Ordering::Less,
+        2 => Ordering::Equal,
+        3 => Ordering::Greater,
+        _ => left.cmp(&right),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "matejko-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lists_supported_files_in_ordinal_order_and_stops_at_the_ends() {
+        let dir = scratch("order");
+        fs::write(dir.join("img2.JPG"), b"").unwrap();
+        fs::write(dir.join("img10.jpg"), b"").unwrap();
+        fs::write(dir.join("a.PNG"), b"").unwrap();
+        fs::write(dir.join("B.jpeg"), b"").unwrap();
+        fs::write(dir.join("notes.txt"), b"skip").unwrap();
+        fs::create_dir(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("nested.jpg"), b"").unwrap();
+
+        let mut catalog = Catalog::open(&dir.join("img2.JPG")).unwrap();
+        let names: Vec<_> = catalog
+            .paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a.PNG", "B.jpeg", "img10.jpg", "img2.JPG"]);
+        assert_eq!(catalog.index(), 3);
+        assert_eq!(catalog.title(), "Matejko — img2.JPG (4 / 4)");
+        assert!(!catalog.move_by(1));
+        assert!(catalog.move_by(-1));
+        assert_eq!(catalog.file_name(), "img10.jpg");
+        assert!(catalog.move_by(-1));
+        assert!(catalog.move_by(-1));
+        assert!(!catalog.move_by(-1));
+        assert_eq!(catalog.file_name(), "a.PNG");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delete_keeps_the_next_image_and_steps_back_at_the_end() {
+        let mut catalog = Catalog {
+            paths: vec!["a.jpg".into(), "b.jpg".into(), "c.jpg".into()],
+            index: 0,
+        };
+        catalog.remove_current();
+        assert_eq!(catalog.file_name(), "b.jpg");
+        catalog.remove_current();
+        assert_eq!(catalog.file_name(), "c.jpg");
+        catalog.remove_current();
+        assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_folder_a_missing_path_and_other_extensions() {
+        let dir = scratch("reject");
+        fs::write(dir.join("notes.txt"), b"").unwrap();
+        assert!(Catalog::open(&dir).unwrap_err().contains("folder"));
+        assert!(Catalog::open(&dir.join("missing.jpg"))
+            .unwrap_err()
+            .contains("Couldn't find"));
+        assert!(Catalog::open(&dir.join("notes.txt"))
+            .unwrap_err()
+            .contains("JPEG and PNG"));
+        let _ = fs::remove_dir_all(dir);
+    }
+}
