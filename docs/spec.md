@@ -64,6 +64,7 @@ Alphabetical means the file name only, compared with case-insensitive ordinal or
 - The title bar shows `Matejko — name.jpg (3 / 40) — F1 for help`. There is no other overlay during normal viewing.
 - The window is resizable and has the usual minimize, maximize, and close controls. Close and Alt+F4 quit immediately, including during help or delete confirmation.
 - Fullscreen is borderless on the monitor that contains the window. The title bar is not visible there, so the file name is hidden until the user leaves fullscreen.
+- In fullscreen the pointer hides as soon as fullscreen starts. Moving it, turning the wheel, or pressing a button shows it for 3 seconds after the last use, then it hides again. A pointer message sent because the window changed size under a still pointer does not count as a move. Leaving fullscreen shows it and leaves it visible.
 
 ### Fitting, zoom, and pan
 

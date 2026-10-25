@@ -3,11 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::windows::MonitorHandleExtWindows;
 use winit::window::{Fullscreen, Window};
@@ -78,8 +79,68 @@ Escape — cancel, leave fullscreen, or quit
 F1 — help
 Mouse wheel — zoom at the pointer
 Drag — pan
+Fullscreen — the pointer hides at once, then returns for 3 seconds when the mouse is used
 
 Esc or F1 to close";
+
+const CURSOR_VISIBLE_FOR: Duration = Duration::from_secs(3);
+
+/// Fullscreen pointer visibility. Hidden until the mouse is used, then shown
+/// until `CURSOR_VISIBLE_FOR` has passed since the last use.
+struct CursorVisibility {
+    visible_until: Option<Instant>,
+}
+
+impl CursorVisibility {
+    fn new() -> Self {
+        Self {
+            visible_until: None,
+        }
+    }
+
+    /// Returns whether the pointer should be drawn.
+    fn on_fullscreen(&mut self, fullscreen: bool) -> bool {
+        self.visible_until = None;
+        !fullscreen
+    }
+
+    fn on_activity(&mut self, now: Instant, fullscreen: bool) -> bool {
+        if !fullscreen {
+            self.visible_until = None;
+            return true;
+        }
+        self.visible_until = Some(now + CURSOR_VISIBLE_FOR);
+        true
+    }
+
+    /// `moved` is a real change of the pointer's screen position. A move event
+    /// caused by the window resizing under a still pointer does not count.
+    fn on_move(&mut self, now: Instant, fullscreen: bool, moved: bool) -> bool {
+        if moved {
+            self.on_activity(now, fullscreen)
+        } else {
+            self.poll(now, fullscreen)
+        }
+    }
+
+    fn poll(&mut self, now: Instant, fullscreen: bool) -> bool {
+        if !fullscreen {
+            self.visible_until = None;
+            return true;
+        }
+        match self.visible_until {
+            Some(until) if now < until => true,
+            _ => {
+                self.visible_until = None;
+                false
+            }
+        }
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.visible_until
+    }
+}
 
 enum CacheEntry {
     Ready(DecodedImage),
@@ -110,6 +171,12 @@ pub struct App {
     shown_size: Option<Vec2>,
     confirm: Confirm,
     decode_error: Option<String>,
+    cursor_visibility: CursorVisibility,
+    cursor_drawn: bool,
+    /// Screen position when the pointer was last hidden or shown. Fullscreen
+    /// entry moves the window under a still pointer, and that must not count
+    /// as the user using the mouse.
+    pointer_anchor: Option<(i32, i32)>,
     pub fatal: Option<String>,
 }
 
@@ -132,6 +199,9 @@ impl App {
             shown_size: None,
             confirm: Confirm::Idle,
             decode_error: None,
+            cursor_visibility: CursorVisibility::new(),
+            cursor_drawn: true,
+            pointer_anchor: None,
             fatal: None,
         }
     }
@@ -193,21 +263,86 @@ impl App {
         }
     }
 
-    fn toggle_fullscreen(&self) {
-        let Some(window) = &self.window else {
+    fn is_fullscreen(&self) -> bool {
+        self.window
+            .as_ref()
+            .and_then(|window| window.fullscreen())
+            .is_some()
+    }
+
+    fn apply_cursor(&mut self, visible: bool) {
+        if self.cursor_drawn == visible {
             return;
-        };
-        if window.fullscreen().is_some() {
-            window.set_fullscreen(None);
-        } else {
-            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+        self.force_cursor(visible);
+    }
+
+    /// Tell Windows even when the cached state already matches. Entering
+    /// fullscreen can show the pointer again after we hid it.
+    fn force_cursor(&mut self, visible: bool) {
+        self.cursor_drawn = visible;
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(visible);
         }
     }
 
-    fn leave_fullscreen(&self) {
+    fn note_mouse(&mut self) {
+        let visible = self
+            .cursor_visibility
+            .on_activity(Instant::now(), self.is_fullscreen());
+        self.apply_cursor(visible);
+    }
+
+    fn note_pointer_motion(&mut self) {
+        let fullscreen = self.is_fullscreen();
+        let moved = if fullscreen {
+            match (self.pointer_anchor, cursor_screen_position()) {
+                (Some(anchor), Some(position)) if position == anchor => false,
+                (_, Some(position)) => {
+                    self.pointer_anchor = Some(position);
+                    true
+                }
+                _ => true,
+            }
+        } else {
+            false
+        };
+        let visible = self
+            .cursor_visibility
+            .on_move(Instant::now(), fullscreen, moved);
+        if visible {
+            self.apply_cursor(true);
+        } else {
+            self.force_cursor(false);
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let enter = window.fullscreen().is_none();
+        if enter {
+            self.pointer_anchor = cursor_screen_position();
+            let visible = self.cursor_visibility.on_fullscreen(true);
+            self.force_cursor(visible);
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.force_cursor(false);
+        } else {
+            window.set_fullscreen(None);
+            self.pointer_anchor = None;
+            let visible = self.cursor_visibility.on_fullscreen(false);
+            self.force_cursor(visible);
+        }
+    }
+
+    fn leave_fullscreen(&mut self) {
         if let Some(window) = &self.window {
             window.set_fullscreen(None);
         }
+        self.pointer_anchor = None;
+        let visible = self.cursor_visibility.on_fullscreen(false);
+        self.force_cursor(visible);
     }
 
     fn shift(&mut self, delta: isize) {
@@ -424,6 +559,25 @@ impl ApplicationHandler<UserEvent> for App {
         self.request_redraw();
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let fullscreen = self.is_fullscreen();
+        let visible = self.cursor_visibility.poll(Instant::now(), fullscreen);
+        if visible {
+            self.apply_cursor(true);
+        } else {
+            self.force_cursor(false);
+        }
+        if fullscreen {
+            if let Some(until) = self.cursor_visibility.wake_at() {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         let UserEvent::Decoded { path, result } = event;
         self.in_flight.remove(&path);
@@ -465,6 +619,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.note_mouse();
                 if !self.image_shown() {
                     return;
                 }
@@ -487,12 +642,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                self.note_mouse();
                 if button != MouseButton::Left {
                     return;
                 }
                 self.dragging = state == ElementState::Pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.note_pointer_motion();
                 let next = Vec2::new(position.x as f32, position.y as f32);
                 if self.dragging && self.cursor_valid && self.image_shown() {
                     self.view
@@ -618,9 +775,25 @@ struct MonitorInfo {
     dw_flags: u32,
 }
 
+#[repr(C)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn GetMonitorInfoW(monitor: *mut std::ffi::c_void, info: *mut MonitorInfo) -> i32;
+    fn GetCursorPos(point: *mut Point) -> i32;
+}
+
+fn cursor_screen_position() -> Option<(i32, i32)> {
+    let mut point = Point { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut point) } == 0 {
+        None
+    } else {
+        Some((point.x, point.y))
+    }
 }
 
 #[cfg(test)]
@@ -687,5 +860,33 @@ mod tests {
             action_for(Command::Help, Mode::Confirming, false),
             Action::None
         );
+    }
+
+    #[test]
+    fn fullscreen_pointer_hides_until_the_mouse_is_used() {
+        let start = Instant::now();
+        let mut cursor = CursorVisibility::new();
+        assert!(!cursor.on_fullscreen(true));
+        assert!(!cursor.poll(start, true));
+        assert!(!cursor.on_move(start, true, false));
+
+        assert!(cursor.on_activity(start, true));
+        assert!(cursor.poll(
+            start + Duration::from_secs(3) - Duration::from_millis(1),
+            true
+        ));
+        assert!(!cursor.poll(start + Duration::from_secs(3), true));
+
+        let again = start + Duration::from_secs(10);
+        assert!(cursor.on_activity(again, true));
+        assert!(cursor.poll(again + Duration::from_secs(2), true));
+        assert!(cursor.on_activity(again + Duration::from_secs(2), true));
+        assert!(cursor.poll(again + Duration::from_secs(4), true));
+        assert!(!cursor.poll(again + Duration::from_secs(5), true));
+
+        assert!(cursor.on_fullscreen(false));
+        assert!(cursor.poll(again, false));
+        assert!(cursor.on_activity(again, false));
+        assert!(cursor.wake_at().is_none());
     }
 }

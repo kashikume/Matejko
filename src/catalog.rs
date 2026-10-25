@@ -211,10 +211,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["a.PNG", "B.jpeg", "img10.jpg", "img2.JPG"]);
         assert_eq!(catalog.index(), 3);
-        assert_eq!(
-            catalog.title(),
-            "Matejko — img2.JPG (4 / 4) — F1 for help"
-        );
+        assert_eq!(catalog.title(), "Matejko — img2.JPG (4 / 4) — F1 for help");
         assert!(!catalog.move_by(1));
         assert!(catalog.move_by(-1));
         assert_eq!(catalog.file_name(), "img10.jpg");
