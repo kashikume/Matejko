@@ -29,7 +29,7 @@ The process takes the image path as its parameter. It opens that image and build
 
 ### Browsing list
 
-The list includes JPEG and PNG files in that directory. Left and Right move to the previous and next file in alphabetical order.
+The list includes JPEG and PNG files in that directory. Left and Right move to the previous and next file in alphabetical order. Home and End jump to the ends. Page Up and Page Down jump by 10 files.
 
 ### Window
 
@@ -89,6 +89,8 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | Input | Viewing | Help / Info | Delete confirmation |
 | --- | --- | --- | --- |
 | Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored |
+| Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored |
+| Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored |
 | Enter | Toggle fullscreen | Ignored | Confirm delete |
 | Delete | Open confirmation | Ignored | Ignored |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored |
@@ -168,7 +170,7 @@ src/app.rs
 ## Acceptance checks
 
 - `matejko photo.jpg` shows that file, fitted, in a window whose title includes the file name and index.
-- Left and Right move in case-insensitive alphabetical order and stop at the ends.
+- Left and Right move in case-insensitive alphabetical order and stop at the ends. Home and End go to the first and last file. Page Up and Page Down jump by 10 and stop at the ends.
 - Files that are not `.jpg`, `.jpeg`, or `.png` are absent from the sequence. A JPEG in a subfolder is absent.
 - Enter toggles borderless fullscreen on the current monitor. Escape leaves fullscreen and does not quit. Escape in the window quits.
 - The wheel keeps the image point under the cursor fixed, including when the pointer is near a corner and when the image is letterboxed. Zoom-out stops once the image fits the window.

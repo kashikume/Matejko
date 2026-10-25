@@ -11,6 +11,8 @@ cargo run --release -- path\to\photo.jpg
 The window title shows the file name and its place in the folder.
 
 - Left / Right — previous or next image
+- Home / End — first or last image
+- Page Up / Page Down — jump by 10 images
 - Enter — switch between a window and fullscreen
 - Delete, then Enter — move the current image to the Recycle Bin
 - Escape — cancel a delete, leave fullscreen, or quit

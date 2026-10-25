@@ -108,13 +108,47 @@ impl Catalog {
         }
     }
 
-    /// Move to the previous (`-1`) or next (`1`) image. Stops at either end.
+    /// Move by `delta` images. Does nothing if that would leave the list.
     pub fn move_by(&mut self, delta: isize) -> bool {
         let next = self.index as isize + delta;
         if next < 0 || next >= self.paths.len() as isize {
             return false;
         }
         self.index = next as usize;
+        true
+    }
+
+    /// Move by `delta`, stopping at the first or last file instead of failing.
+    pub fn move_clamped(&mut self, delta: isize) -> bool {
+        if self.paths.is_empty() {
+            return false;
+        }
+        let last = (self.paths.len() - 1) as isize;
+        let next = (self.index as isize + delta).clamp(0, last) as usize;
+        if next == self.index {
+            return false;
+        }
+        self.index = next;
+        true
+    }
+
+    pub fn go_to_first(&mut self) -> bool {
+        if self.paths.is_empty() || self.index == 0 {
+            return false;
+        }
+        self.index = 0;
+        true
+    }
+
+    pub fn go_to_last(&mut self) -> bool {
+        if self.paths.is_empty() {
+            return false;
+        }
+        let last = self.paths.len() - 1;
+        if self.index == last {
+            return false;
+        }
+        self.index = last;
         true
     }
 
@@ -219,6 +253,16 @@ mod tests {
         assert!(catalog.move_by(-1));
         assert!(!catalog.move_by(-1));
         assert_eq!(catalog.file_name(), "a.PNG");
+
+        assert!(catalog.move_clamped(10));
+        assert_eq!(catalog.file_name(), "img2.JPG");
+        assert!(!catalog.move_clamped(10));
+        assert!(catalog.go_to_first());
+        assert_eq!(catalog.file_name(), "a.PNG");
+        assert!(!catalog.go_to_first());
+        assert!(catalog.go_to_last());
+        assert_eq!(catalog.file_name(), "img2.JPG");
+        assert!(!catalog.go_to_last());
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -23,6 +23,10 @@ use crate::view::{Vec2, View};
 pub enum Command {
     Left,
     Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
     Enter,
     Delete,
     Escape,
@@ -44,6 +48,10 @@ pub enum Action {
     None,
     Previous,
     Next,
+    First,
+    Last,
+    PageBack,
+    PageForward,
     ToggleFullscreen,
     LeaveFullscreen,
     Quit,
@@ -54,14 +62,28 @@ pub enum Action {
     CancelOverlay,
 }
 
+const PAGE_STEP: isize = 10;
+
 pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
-    let repeat_blocked = repeat && !matches!(command, Command::Left | Command::Right);
-    if repeat_blocked {
+    let nav_repeat = matches!(
+        command,
+        Command::Left
+            | Command::Right
+            | Command::Home
+            | Command::End
+            | Command::PageUp
+            | Command::PageDown
+    );
+    if repeat && !nav_repeat {
         return Action::None;
     }
     match (mode, command) {
         (Mode::Viewing { .. }, Command::Left) => Action::Previous,
         (Mode::Viewing { .. }, Command::Right) => Action::Next,
+        (Mode::Viewing { .. }, Command::Home) => Action::First,
+        (Mode::Viewing { .. }, Command::End) => Action::Last,
+        (Mode::Viewing { .. }, Command::PageUp) => Action::PageBack,
+        (Mode::Viewing { .. }, Command::PageDown) => Action::PageForward,
         (Mode::Viewing { .. }, Command::Enter) => Action::ToggleFullscreen,
         (Mode::Viewing { .. }, Command::Delete) => Action::AskDelete,
         (Mode::Viewing { fullscreen: true }, Command::Escape) => Action::LeaveFullscreen,
@@ -79,6 +101,8 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
 
 const HELP_TEXT: &str = "\
 Left / Right — previous or next image
+Home / End — first or last image
+Page Up / Page Down — jump by 10 images
 Enter — window or fullscreen
 Delete — delete the image
 I — image information
@@ -253,6 +277,10 @@ impl App {
             Action::None => {}
             Action::Previous => self.shift(-1),
             Action::Next => self.shift(1),
+            Action::First => self.jump_first(),
+            Action::Last => self.jump_last(),
+            Action::PageBack => self.shift_clamped(-PAGE_STEP),
+            Action::PageForward => self.shift_clamped(PAGE_STEP),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
             Action::LeaveFullscreen => self.leave_fullscreen(),
             Action::Quit => event_loop.exit(),
@@ -362,6 +390,31 @@ impl App {
         if !self.catalog.move_by(delta) {
             return;
         }
+        self.after_navigate();
+    }
+
+    fn shift_clamped(&mut self, delta: isize) {
+        if !self.catalog.move_clamped(delta) {
+            return;
+        }
+        self.after_navigate();
+    }
+
+    fn jump_first(&mut self) {
+        if !self.catalog.go_to_first() {
+            return;
+        }
+        self.after_navigate();
+    }
+
+    fn jump_last(&mut self) {
+        if !self.catalog.go_to_last() {
+            return;
+        }
+        self.after_navigate();
+    }
+
+    fn after_navigate(&mut self) {
         self.decode_error = None;
         self.refresh_title();
         self.sync_images();
@@ -719,6 +772,10 @@ fn command_from(key: &Key) -> Option<Command> {
     match key {
         Key::Named(NamedKey::ArrowLeft) => Some(Command::Left),
         Key::Named(NamedKey::ArrowRight) => Some(Command::Right),
+        Key::Named(NamedKey::Home) => Some(Command::Home),
+        Key::Named(NamedKey::End) => Some(Command::End),
+        Key::Named(NamedKey::PageUp) => Some(Command::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(Command::PageDown),
         Key::Named(NamedKey::Enter) => Some(Command::Enter),
         Key::Named(NamedKey::Delete) => Some(Command::Delete),
         Key::Named(NamedKey::Escape) => Some(Command::Escape),
@@ -839,6 +896,20 @@ mod tests {
         let fullscreen = Mode::Viewing { fullscreen: true };
         assert_eq!(action_for(Command::Left, viewing, false), Action::Previous);
         assert_eq!(action_for(Command::Right, viewing, true), Action::Next);
+        assert_eq!(action_for(Command::Home, viewing, false), Action::First);
+        assert_eq!(action_for(Command::End, viewing, false), Action::Last);
+        assert_eq!(
+            action_for(Command::PageUp, viewing, true),
+            Action::PageBack
+        );
+        assert_eq!(
+            action_for(Command::PageDown, viewing, false),
+            Action::PageForward
+        );
+        assert_eq!(
+            action_for(Command::Home, Mode::Help, false),
+            Action::None
+        );
         assert_eq!(
             action_for(Command::Enter, viewing, false),
             Action::ToggleFullscreen
