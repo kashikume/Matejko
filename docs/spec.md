@@ -102,6 +102,7 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | Enter | Toggle fullscreen | Ignored | Confirm delete |
 | Delete | Open confirmation | Ignored | Ignored |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored |
+| O | Open With dialog for the current file | Ignored | Ignored |
 | F1 | Open help | Close help if help is open; otherwise ignored | Ignored |
 | Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel |
 | Close, Alt+F4 | Quit | Quit | Quit |

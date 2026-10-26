@@ -1,7 +1,9 @@
 //! Window, input, and the delete confirmation.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,6 +15,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::windows::{MonitorHandleExtWindows, WindowAttributesExtWindows};
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Fullscreen, Icon, Window};
 
 use crate::catalog::{Catalog, Refresh};
@@ -35,6 +38,7 @@ pub enum Command {
     Escape,
     Help,
     Info,
+    OpenWith,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +66,7 @@ pub enum Action {
     DoDelete,
     ShowHelp,
     ShowInfo,
+    OpenWith,
     CancelOverlay,
 }
 
@@ -108,6 +113,7 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { fullscreen: false }, Command::Escape) => Action::Quit,
         (Mode::Viewing { .. }, Command::Help) => Action::ShowHelp,
         (Mode::Viewing { .. }, Command::Info) => Action::ShowInfo,
+        (Mode::Viewing { .. }, Command::OpenWith) => Action::OpenWith,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
         (Mode::Confirming, Command::Enter) => Action::DoDelete,
@@ -124,6 +130,7 @@ Page Up / Page Down — jump by 10 images
 Enter — window or fullscreen
 Delete — delete the image
 I — image information
+O — open with another app
 Escape — cancel, leave fullscreen, or quit
 F1 — help
 Mouse wheel — zoom at the pointer
@@ -319,11 +326,36 @@ impl App {
                 self.prompt = Some(Prompt::Info);
                 self.request_redraw();
             }
+            Action::OpenWith => self.open_with_current(),
             Action::DoDelete => self.delete_current(event_loop),
             Action::CancelOverlay => {
                 self.prompt = None;
                 self.request_redraw();
             }
+        }
+    }
+
+    fn open_with_current(&self) {
+        if self.catalog.is_empty() {
+            return;
+        }
+        let path = self.catalog.current_path();
+        let wide: Vec<u16> = OsStr::new(path.as_os_str())
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let hwnd = self
+            .window
+            .as_ref()
+            .and_then(|window| window_hwnd(window))
+            .unwrap_or(std::ptr::null_mut());
+        let info = OpenAsInfo {
+            file: wide.as_ptr(),
+            class: std::ptr::null(),
+            flags: OAIF_EXEC,
+        };
+        unsafe {
+            let _ = SHOpenWithDialog(hwnd, &info);
         }
     }
 
@@ -888,6 +920,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::Escape) => Some(Command::Escape),
         Key::Named(NamedKey::F1) => Some(Command::Help),
         Key::Character(ch) if ch.eq_ignore_ascii_case("i") => Some(Command::Info),
+        Key::Character(ch) if ch.eq_ignore_ascii_case("o") => Some(Command::OpenWith),
         _ => None,
     }
 }
@@ -969,10 +1002,33 @@ struct Point {
     y: i32,
 }
 
+/// Open the file after the user picks an app in the Open With dialog.
+const OAIF_EXEC: u32 = 0x4;
+
+#[repr(C)]
+struct OpenAsInfo {
+    file: *const u16,
+    class: *const u16,
+    flags: u32,
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn GetMonitorInfoW(monitor: *mut std::ffi::c_void, info: *mut MonitorInfo) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn SHOpenWithDialog(hwnd_parent: *mut std::ffi::c_void, info: *const OpenAsInfo) -> i32;
+}
+
+fn window_hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as *mut std::ffi::c_void),
+        _ => None,
+    }
 }
 
 fn cursor_screen_position() -> Option<(i32, i32)> {
@@ -1088,6 +1144,19 @@ mod tests {
         );
         assert_eq!(action_for(Command::Info, Mode::Help, false), Action::None);
         assert_eq!(action_for(Command::Help, Mode::Info, false), Action::None);
+        assert_eq!(
+            action_for(Command::OpenWith, viewing, false),
+            Action::OpenWith
+        );
+        assert_eq!(action_for(Command::OpenWith, viewing, true), Action::None);
+        assert_eq!(
+            action_for(Command::OpenWith, Mode::Help, false),
+            Action::None
+        );
+        assert_eq!(
+            action_for(Command::OpenWith, Mode::Confirming, false),
+            Action::None
+        );
     }
 
     #[test]

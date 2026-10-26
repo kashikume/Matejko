@@ -18,6 +18,7 @@ The window title shows the file name and its place in the folder.
 - Escape — cancel a delete, leave fullscreen, or quit
 - F1 — show these keys
 - I — show file and EXIF information
+- O — Open With another app
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 
