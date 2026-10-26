@@ -19,8 +19,19 @@ extern "system" {
 
 #[derive(Debug)]
 pub struct Catalog {
+    dir: PathBuf,
     paths: Vec<PathBuf>,
     index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refresh {
+    /// The previous current path is still in the list.
+    KeptCurrent,
+    /// The previous current path is gone; index now points at the next/previous file.
+    CurrentRemoved,
+    /// No supported images remain in the folder.
+    Empty,
 }
 
 impl Catalog {
@@ -41,33 +52,80 @@ impl Catalog {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let entries = fs::read_dir(parent)
-            .map_err(|err| format!("Couldn't read {}: {err}", parent.display()))?;
-
-        let mut paths = Vec::new();
-        for entry in entries {
-            let entry =
-                entry.map_err(|err| format!("Couldn't read {}: {err}", parent.display()))?;
-            let candidate = entry.path();
-            if !is_supported(&candidate) {
-                continue;
-            }
-            let is_file = entry
-                .metadata()
-                .map(|metadata| metadata.is_file())
-                .unwrap_or(false);
-            if is_file {
-                paths.push(candidate);
-            }
-        }
-
-        paths.sort_by(|left, right| cmp_file_names(left, right));
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let paths = scan_dir(&parent)?;
         let index = paths
             .iter()
             .position(|candidate| file_names_equal(candidate, path))
             .ok_or_else(|| format!("Couldn't find {} in its folder.", path.display()))?;
-        Ok(Self { paths, index })
+        Ok(Self {
+            dir: parent,
+            paths,
+            index,
+        })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn contains_path(&self, path: &Path) -> bool {
+        self.paths.iter().any(|candidate| candidate == path)
+    }
+
+    /// Rescan the folder. Keeps the current path when it still exists; otherwise
+    /// picks the next file the same way as deleting the current image in-app.
+    pub fn refresh(&mut self) -> Refresh {
+        let previous = if self.paths.is_empty() {
+            None
+        } else {
+            Some(self.paths[self.index].clone())
+        };
+        let next_after = previous.as_ref().and_then(|_| {
+            self.neighbor(1).map(Path::to_path_buf)
+        });
+        let prev_before = previous.as_ref().and_then(|_| {
+            self.neighbor(-1).map(Path::to_path_buf)
+        });
+
+        let paths = match scan_dir(&self.dir) {
+            Ok(paths) => paths,
+            Err(_) => {
+                self.paths.clear();
+                self.index = 0;
+                return Refresh::Empty;
+            }
+        };
+
+        if paths.is_empty() {
+            self.paths = paths;
+            self.index = 0;
+            return Refresh::Empty;
+        }
+
+        if let Some(current) = &previous {
+            if let Some(index) = paths.iter().position(|path| path == current) {
+                self.paths = paths;
+                self.index = index;
+                return Refresh::KeptCurrent;
+            }
+        }
+
+        let index = next_after
+            .and_then(|path| paths.iter().position(|candidate| candidate == &path))
+            .or_else(|| {
+                prev_before.and_then(|path| paths.iter().position(|candidate| candidate == &path))
+            })
+            .unwrap_or_else(|| previous.as_ref().map(|_| self.index.min(paths.len() - 1)).unwrap_or(0));
+
+        self.paths = paths;
+        self.index = index;
+        if previous.is_some() {
+            Refresh::CurrentRemoved
+        } else {
+            Refresh::KeptCurrent
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -172,6 +230,28 @@ pub fn is_supported(path: &Path) -> bool {
         || extension.eq_ignore_ascii_case("png")
 }
 
+fn scan_dir(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries =
+        fs::read_dir(dir).map_err(|err| format!("Couldn't read {}: {err}", dir.display()))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Couldn't read {}: {err}", dir.display()))?;
+        let candidate = entry.path();
+        if !is_supported(&candidate) {
+            continue;
+        }
+        let is_file = entry
+            .metadata()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        if is_file {
+            paths.push(candidate);
+        }
+    }
+    paths.sort_by(|left, right| cmp_file_names(left, right));
+    Ok(paths)
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -270,6 +350,7 @@ mod tests {
     #[test]
     fn delete_keeps_the_next_image_and_steps_back_at_the_end() {
         let mut catalog = Catalog {
+            dir: PathBuf::from("."),
             paths: vec!["a.jpg".into(), "b.jpg".into(), "c.jpg".into()],
             index: 0,
         };
@@ -279,6 +360,51 @@ mod tests {
         assert_eq!(catalog.file_name(), "c.jpg");
         catalog.remove_current();
         assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn refresh_keeps_the_current_path_when_neighbors_change() {
+        let dir = scratch("refresh-keep");
+        fs::write(dir.join("a.jpg"), b"").unwrap();
+        fs::write(dir.join("b.jpg"), b"").unwrap();
+        fs::write(dir.join("c.jpg"), b"").unwrap();
+        let mut catalog = Catalog::open(&dir.join("b.jpg")).unwrap();
+        assert_eq!(catalog.index(), 1);
+
+        fs::write(dir.join("aa.jpg"), b"").unwrap();
+        assert_eq!(catalog.refresh(), Refresh::KeptCurrent);
+        assert_eq!(catalog.file_name(), "b.jpg");
+        assert_eq!(catalog.len(), 4);
+
+        fs::remove_file(dir.join("a.jpg")).unwrap();
+        assert_eq!(catalog.refresh(), Refresh::KeptCurrent);
+        assert_eq!(catalog.file_name(), "b.jpg");
+        assert_eq!(catalog.len(), 3);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_moves_like_delete_when_the_current_file_vanishes() {
+        let dir = scratch("refresh-gone");
+        fs::write(dir.join("a.jpg"), b"").unwrap();
+        fs::write(dir.join("b.jpg"), b"").unwrap();
+        fs::write(dir.join("c.jpg"), b"").unwrap();
+        let mut catalog = Catalog::open(&dir.join("b.jpg")).unwrap();
+
+        fs::remove_file(dir.join("b.jpg")).unwrap();
+        assert_eq!(catalog.refresh(), Refresh::CurrentRemoved);
+        assert_eq!(catalog.file_name(), "c.jpg");
+
+        fs::remove_file(dir.join("c.jpg")).unwrap();
+        assert_eq!(catalog.refresh(), Refresh::CurrentRemoved);
+        assert_eq!(catalog.file_name(), "a.jpg");
+
+        fs::remove_file(dir.join("a.jpg")).unwrap();
+        assert_eq!(catalog.refresh(), Refresh::Empty);
+        assert!(catalog.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

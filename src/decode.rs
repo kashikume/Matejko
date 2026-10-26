@@ -19,6 +19,8 @@ pub enum UserEvent {
         path: PathBuf,
         result: Result<DecodedImage, String>,
     },
+    /// The watched folder changed. The app debounces before rescanning.
+    FolderDirty,
 }
 
 struct Jobs {

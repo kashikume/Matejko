@@ -6,6 +6,7 @@ mod decode;
 mod gpu;
 mod info;
 mod view;
+mod watch;
 
 use std::path::Path;
 

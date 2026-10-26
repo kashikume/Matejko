@@ -1,10 +1,12 @@
 //! Window, input, and the delete confirmation.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use notify::RecommendedWatcher;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -13,11 +15,12 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::windows::{MonitorHandleExtWindows, WindowAttributesExtWindows};
 use winit::window::{Fullscreen, Icon, Window};
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Refresh};
 use crate::decode::{DecodedImage, Decoder, UserEvent};
 use crate::gpu::{Frame, Gpu};
 use crate::info::format_image_info;
 use crate::view::{Vec2, View};
+use crate::watch::watch_folder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -63,6 +66,21 @@ pub enum Action {
 }
 
 const PAGE_STEP: isize = 10;
+const FOLDER_DEBOUNCE: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+fn read_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok()?,
+    })
+}
 
 pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
     let nav_repeat = matches!(
@@ -208,6 +226,9 @@ pub struct App {
     /// entry moves the window under a still pointer, and that must not count
     /// as the user using the mouse.
     pointer_anchor: Option<(i32, i32)>,
+    stamps: HashMap<PathBuf, FileStamp>,
+    folder_dirty_until: Option<Instant>,
+    _watcher: Option<RecommendedWatcher>,
     pub fatal: Option<String>,
 }
 
@@ -233,6 +254,9 @@ impl App {
             cursor_visibility: CursorVisibility::new(),
             cursor_drawn: true,
             pointer_anchor: None,
+            stamps: HashMap::new(),
+            folder_dirty_until: None,
+            _watcher: None,
             fatal: None,
         }
     }
@@ -466,7 +490,72 @@ impl App {
         }
         self.cache
             .retain(|path, _| relevant.iter().any(|kept| kept == path));
+        self.stamps
+            .retain(|path, _| relevant.iter().any(|kept| kept == path));
+        for path in &relevant {
+            if let Some(stamp) = read_stamp(path) {
+                self.stamps.insert(path.clone(), stamp);
+            }
+        }
         self.apply_current();
+    }
+
+    fn note_folder_dirty(&mut self, event_loop: &ActiveEventLoop) {
+        let until = Instant::now() + FOLDER_DEBOUNCE;
+        self.folder_dirty_until = Some(until);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+    }
+
+    fn apply_folder_changes(&mut self, event_loop: &ActiveEventLoop) {
+        let old_current = if self.catalog.is_empty() {
+            None
+        } else {
+            Some(self.catalog.current_path())
+        };
+        match self.catalog.refresh() {
+            Refresh::Empty => {
+                event_loop.exit();
+                return;
+            }
+            Refresh::CurrentRemoved => {
+                if let Some(old) = &old_current {
+                    self.cache.remove(old);
+                    self.in_flight.remove(old);
+                    self.stamps.remove(old);
+                    if self.displayed.as_ref() == Some(old) {
+                        self.displayed = None;
+                    }
+                }
+                self.prompt = None;
+                self.decode_error = None;
+            }
+            Refresh::KeptCurrent => {}
+        }
+        self.invalidate_stale_cache();
+        self.refresh_title();
+        self.sync_images();
+        self.request_redraw();
+    }
+
+    fn invalidate_stale_cache(&mut self) {
+        let cached: Vec<PathBuf> = self.cache.keys().cloned().collect();
+        for path in cached {
+            let stale = if !self.catalog.contains_path(&path) {
+                true
+            } else {
+                match (self.stamps.get(&path), read_stamp(&path)) {
+                    (Some(old), Some(new)) => old != &new,
+                    _ => true,
+                }
+            };
+            if stale {
+                self.cache.remove(&path);
+                self.in_flight.remove(&path);
+                if self.displayed.as_ref() == Some(&path) {
+                    self.displayed = None;
+                }
+            }
+        }
     }
 
     fn request_decode(&mut self, path: PathBuf, front: bool) {
@@ -629,46 +718,65 @@ impl ApplicationHandler<UserEvent> for App {
         let max_edge = gpu.max_edge();
         self.gpu = Some(gpu);
         self.decoder = Some(Decoder::spawn(self.proxy.clone(), max_edge));
+        self._watcher = watch_folder(self.catalog.dir(), self.proxy.clone());
         self.window = Some(window);
         self.sync_images();
         self.request_redraw();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self
+            .folder_dirty_until
+            .is_some_and(|until| now >= until)
+        {
+            self.folder_dirty_until = None;
+            self.apply_folder_changes(event_loop);
+            if self.fatal.is_some() || self.catalog.is_empty() {
+                return;
+            }
+        }
+
         let fullscreen = self.is_fullscreen();
-        let visible = self.cursor_visibility.poll(Instant::now(), fullscreen);
+        let visible = self.cursor_visibility.poll(now, fullscreen);
         if visible {
             self.apply_cursor(true);
         } else {
             self.force_cursor(false);
         }
+
+        let mut wake_at = self.folder_dirty_until;
         if fullscreen {
             if let Some(until) = self.cursor_visibility.wake_at() {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
-            } else {
-                event_loop.set_control_flow(ControlFlow::Wait);
+                wake_at = Some(wake_at.map_or(until, |existing| existing.min(until)));
             }
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        match wake_at {
+            Some(until) => event_loop.set_control_flow(ControlFlow::WaitUntil(until)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Decoded { path, result } = event;
-        self.in_flight.remove(&path);
-        if !self.is_relevant(&path) {
-            return;
-        }
-        match result {
-            Ok(image) => {
-                self.cache.insert(path, CacheEntry::Ready(image));
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::FolderDirty => self.note_folder_dirty(event_loop),
+            UserEvent::Decoded { path, result } => {
+                self.in_flight.remove(&path);
+                if !self.is_relevant(&path) {
+                    return;
+                }
+                match result {
+                    Ok(image) => {
+                        self.cache.insert(path, CacheEntry::Ready(image));
+                    }
+                    Err(err) => {
+                        self.cache.insert(path, CacheEntry::Failed(err));
+                    }
+                }
+                self.apply_current();
+                self.request_redraw();
             }
-            Err(err) => {
-                self.cache.insert(path, CacheEntry::Failed(err));
-            }
         }
-        self.apply_current();
-        self.request_redraw();
     }
 
     fn window_event(

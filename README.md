@@ -1,6 +1,6 @@
 # Matejko
 
-A small photo viewer for Windows. It opens one image, reads the other JPEG and PNG files in the same folder, and moves through them from the keyboard. The app icon is a baffled painter inspecting a Polaroid.
+A small photo viewer for Windows. It opens one image, reads the other JPEG and PNG files in the same folder, and moves through them from the keyboard. The folder is watched so external adds, deletes, and edits update the list or reload the current picture. The app icon is a baffled painter inspecting a Polaroid.
 
 ## Run
 

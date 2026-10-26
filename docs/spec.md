@@ -16,7 +16,6 @@ Matejko is a Windows photo viewer. It stays small: one window, no menus, no thum
 - Formats other than JPEG and PNG (no GIF, WebP, HEIC, RAW, or animated PNG).
 - Color profiles. Pixels are treated as sRGB.
 - Thumbnails, slideshows, editing, rename, copy, print, or a folder tree.
-- Watching the folder for changes made by other programs.
 - Remembering window size, zoom, or the last opened file.
 - Registering as the default Windows photo app.
 - A settings file.
@@ -30,6 +29,15 @@ The process takes the image path as its parameter. It opens that image and build
 ### Browsing list
 
 The list includes JPEG and PNG files in that directory. Left and Right move to the previous and next file in alphabetical order. Home and End jump to the ends. Page Up and Page Down jump by 10 files.
+
+### Folder watching
+
+The app watches the image's parent directory (not recursive) for changes made outside Matejko:
+
+- When a supported file appears or disappears, the browse list is rebuilt. The viewer stays on the same path when that file still exists.
+- When the current file's contents change (size or modified time), it is decoded again and shown fitted.
+- When the current file is removed or renamed away, navigation matches an in-app delete: show the next image, or the previous if it was last, or exit if none remain.
+- Folder events are coalesced for about 100 ms so a single save does not thrash. If the watcher cannot start, the app still runs without live updates.
 
 ### Window
 
@@ -138,6 +146,7 @@ Crates:
 - `wgpu` to draw one textured quad. This is what keeps wheel zoom and dragging on the GPU.
 - `image` with only the JPEG and PNG features.
 - `kamadak-exif` for the information overlay.
+- `notify` to watch the folder for external adds, removes, and writes.
 - `glyphon` for the delete confirmation, help, info, and decode errors, so file names keep their Unicode characters.
 - `trash` to send files to the Recycle Bin.
 
@@ -151,6 +160,7 @@ Crates:
 - `decode` — background JPEG/PNG decode and EXIF orientation.
 - `gpu` — device, swapchain, texture upload, draw.
 - `info` — file and EXIF text for the information overlay.
+- `watch` — directory watcher bridged into the event loop.
 - `app` — event loop, input, confirmation state.
 
 `catalog` and `view` stay free of `winit` and `wgpu` so the sort, neighbor, delete-index, and zoom math can be unit tested.
@@ -171,6 +181,7 @@ src/app.rs
 
 - `matejko photo.jpg` shows that file, fitted, in a window whose title includes the file name and index.
 - Left and Right move in case-insensitive alphabetical order and stop at the ends. Home and End go to the first and last file. Page Up and Page Down jump by 10 and stop at the ends.
+- Adding or removing a JPEG/PNG in the folder updates the list. Editing the current file reloads it. Removing the current file outside the app behaves like Delete.
 - Files that are not `.jpg`, `.jpeg`, or `.png` are absent from the sequence. A JPEG in a subfolder is absent.
 - Enter toggles borderless fullscreen on the current monitor. Escape leaves fullscreen and does not quit. Escape in the window quits.
 - The wheel keeps the image point under the cursor fixed, including when the pointer is near a corner and when the image is letterboxed. Zoom-out stops once the image fits the window.
