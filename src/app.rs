@@ -178,11 +178,10 @@ enum CacheEntry {
     Failed(String),
 }
 
-enum Confirm {
-    Idle,
+enum Prompt {
     Help,
     Info,
-    Prompt,
+    Delete,
     Failed(String),
 }
 
@@ -201,7 +200,7 @@ pub struct App {
     in_flight: HashSet<PathBuf>,
     displayed: Option<PathBuf>,
     shown_size: Option<Vec2>,
-    confirm: Confirm,
+    prompt: Option<Prompt>,
     decode_error: Option<String>,
     cursor_visibility: CursorVisibility,
     cursor_drawn: bool,
@@ -229,7 +228,7 @@ impl App {
             in_flight: HashSet::new(),
             displayed: None,
             shown_size: None,
-            confirm: Confirm::Idle,
+            prompt: None,
             decode_error: None,
             cursor_visibility: CursorVisibility::new(),
             cursor_drawn: true,
@@ -263,12 +262,12 @@ impl App {
             .as_ref()
             .and_then(|window| window.fullscreen())
             .is_some();
-        match self.confirm {
-            Confirm::Help => Mode::Help,
-            Confirm::Info => Mode::Info,
-            Confirm::Prompt => Mode::Confirming,
-            Confirm::Failed(_) => Mode::DeleteFailed,
-            Confirm::Idle => Mode::Viewing { fullscreen },
+        match &self.prompt {
+            Some(Prompt::Help) => Mode::Help,
+            Some(Prompt::Info) => Mode::Info,
+            Some(Prompt::Delete) => Mode::Confirming,
+            Some(Prompt::Failed(_)) => Mode::DeleteFailed,
+            None => Mode::Viewing { fullscreen },
         }
     }
 
@@ -285,20 +284,20 @@ impl App {
             Action::LeaveFullscreen => self.leave_fullscreen(),
             Action::Quit => event_loop.exit(),
             Action::AskDelete => {
-                self.confirm = Confirm::Prompt;
+                self.prompt = Some(Prompt::Delete);
                 self.request_redraw();
             }
             Action::ShowHelp => {
-                self.confirm = Confirm::Help;
+                self.prompt = Some(Prompt::Help);
                 self.request_redraw();
             }
             Action::ShowInfo => {
-                self.confirm = Confirm::Info;
+                self.prompt = Some(Prompt::Info);
                 self.request_redraw();
             }
             Action::DoDelete => self.delete_current(event_loop),
             Action::CancelOverlay => {
-                self.confirm = Confirm::Idle;
+                self.prompt = None;
                 self.request_redraw();
             }
         }
@@ -432,14 +431,14 @@ impl App {
                     event_loop.exit();
                     return;
                 }
-                self.confirm = Confirm::Idle;
+                self.prompt = None;
                 self.decode_error = None;
                 self.refresh_title();
                 self.sync_images();
                 self.request_redraw();
             }
             Err(err) => {
-                self.confirm = Confirm::Failed(err.to_string());
+                self.prompt = Some(Prompt::Failed(err.to_string()));
                 self.request_redraw();
             }
         }
@@ -558,22 +557,22 @@ impl App {
             return None;
         }
         let name = self.catalog.file_name();
-        match &self.confirm {
-            Confirm::Help => Some(HELP_TEXT.to_string()),
-            Confirm::Info => {
+        match &self.prompt {
+            Some(Prompt::Help) => Some(HELP_TEXT.to_string()),
+            Some(Prompt::Info) => {
                 let path = self.catalog.current_path();
                 let pixels = self
                     .image_size()
                     .map(|size| (size.x.round() as u32, size.y.round() as u32));
                 Some(format_image_info(&path, pixels))
             }
-            Confirm::Prompt => Some(format!(
+            Some(Prompt::Delete) => Some(format!(
                 "Delete \"{name}\"?\nEnter to delete, Esc to cancel"
             )),
-            Confirm::Failed(err) => Some(format!(
+            Some(Prompt::Failed(err)) => Some(format!(
                 "Couldn't move \"{name}\" to the Recycle Bin.\n{err}\nEsc to dismiss"
             )),
-            Confirm::Idle => self
+            None => self
                 .decode_error
                 .as_ref()
                 .map(|err| format!("{name}\n{err}")),
@@ -752,7 +751,7 @@ impl ApplicationHandler<UserEvent> for App {
                     scale: self.view.scale,
                     pan_x: self.view.pan.x,
                     pan_y: self.view.pan.y,
-                    dim: !matches!(self.confirm, Confirm::Idle),
+                    dim: self.prompt.is_some(),
                     text: text.as_deref(),
                     scale_factor,
                 };
