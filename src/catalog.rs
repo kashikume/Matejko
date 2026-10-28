@@ -1,4 +1,4 @@
-//! The JPEG and PNG files in one folder, in case-insensitive ordinal order.
+//! The JPEG, PNG, and MP4 files in one folder, in case-insensitive ordinal order.
 
 use std::cmp::Ordering;
 use std::ffi::OsStr;
@@ -30,7 +30,7 @@ pub enum Refresh {
     KeptCurrent,
     /// The previous current path is gone; index now points at the next/previous file.
     CurrentRemoved,
-    /// No supported images remain in the folder.
+    /// No supported files remain in the folder.
     Empty,
 }
 
@@ -40,13 +40,15 @@ impl Catalog {
             return Err(format!("Couldn't find {}.", path.display()));
         }
         if path.is_dir() {
-            return Err("Matejko opens an image file. Pass a JPEG or PNG, not a folder.".into());
+            return Err(
+                "Matejko opens a JPEG, PNG, or MP4 file. Pass a file, not a folder.".into(),
+            );
         }
         if !path.is_file() {
             return Err(format!("{} is not a file.", path.display()));
         }
         if !is_supported(path) {
-            return Err("Matejko opens JPEG and PNG files only.".into());
+            return Err("Matejko opens JPEG, PNG, and MP4 files only.".into());
         }
 
         let parent = path
@@ -82,12 +84,12 @@ impl Catalog {
         } else {
             Some(self.paths[self.index].clone())
         };
-        let next_after = previous.as_ref().and_then(|_| {
-            self.neighbor(1).map(Path::to_path_buf)
-        });
-        let prev_before = previous.as_ref().and_then(|_| {
-            self.neighbor(-1).map(Path::to_path_buf)
-        });
+        let next_after = previous
+            .as_ref()
+            .and_then(|_| self.neighbor(1).map(Path::to_path_buf));
+        let prev_before = previous
+            .as_ref()
+            .and_then(|_| self.neighbor(-1).map(Path::to_path_buf));
 
         let paths = match scan_dir(&self.dir) {
             Ok(paths) => paths,
@@ -117,7 +119,12 @@ impl Catalog {
             .or_else(|| {
                 prev_before.and_then(|path| paths.iter().position(|candidate| candidate == &path))
             })
-            .unwrap_or_else(|| previous.as_ref().map(|_| self.index.min(paths.len() - 1)).unwrap_or(0));
+            .unwrap_or_else(|| {
+                previous
+                    .as_ref()
+                    .map(|_| self.index.min(paths.len() - 1))
+                    .unwrap_or(0)
+            });
 
         self.paths = paths;
         self.index = index;
@@ -221,6 +228,11 @@ impl Catalog {
     }
 }
 
+pub fn is_video(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+}
+
 pub fn is_supported(path: &Path) -> bool {
     let Some(extension) = path.extension() else {
         return false;
@@ -228,6 +240,7 @@ pub fn is_supported(path: &Path) -> bool {
     extension.eq_ignore_ascii_case("jpg")
         || extension.eq_ignore_ascii_case("jpeg")
         || extension.eq_ignore_ascii_case("png")
+        || extension.eq_ignore_ascii_case("mp4")
 }
 
 fn scan_dir(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -313,6 +326,7 @@ mod tests {
         fs::write(dir.join("img10.jpg"), b"").unwrap();
         fs::write(dir.join("a.PNG"), b"").unwrap();
         fs::write(dir.join("B.jpeg"), b"").unwrap();
+        fs::write(dir.join("clip.MP4"), b"").unwrap();
         fs::write(dir.join("notes.txt"), b"skip").unwrap();
         fs::create_dir(dir.join("sub")).unwrap();
         fs::write(dir.join("sub").join("nested.jpg"), b"").unwrap();
@@ -323,13 +337,19 @@ mod tests {
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["a.PNG", "B.jpeg", "img10.jpg", "img2.JPG"]);
-        assert_eq!(catalog.index(), 3);
-        assert_eq!(catalog.title(), "Matejko — img2.JPG (4 / 4) — F1 for help");
+        assert_eq!(
+            names,
+            ["a.PNG", "B.jpeg", "clip.MP4", "img10.jpg", "img2.JPG"]
+        );
+        assert_eq!(catalog.index(), 4);
+        assert_eq!(catalog.title(), "Matejko — img2.JPG (5 / 5) — F1 for help");
         assert!(!catalog.move_by(1));
         assert!(catalog.move_by(-1));
         assert_eq!(catalog.file_name(), "img10.jpg");
         assert!(catalog.move_by(-1));
+        assert_eq!(catalog.file_name(), "clip.MP4");
+        assert!(catalog.move_by(-1));
+        assert_eq!(catalog.file_name(), "B.jpeg");
         assert!(catalog.move_by(-1));
         assert!(!catalog.move_by(-1));
         assert_eq!(catalog.file_name(), "a.PNG");
@@ -417,7 +437,7 @@ mod tests {
             .contains("Couldn't find"));
         assert!(Catalog::open(&dir.join("notes.txt"))
             .unwrap_err()
-            .contains("JPEG and PNG"));
+            .contains("JPEG, PNG, and MP4"));
         let _ = fs::remove_dir_all(dir);
     }
 }

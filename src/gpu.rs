@@ -12,6 +12,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::decode::DecodedImage;
+use crate::transport::Layout;
 
 const SHADER: &str = r#"
 struct VertexOutput {
@@ -50,6 +51,12 @@ struct Vertex {
     color: [f32; 4],
 }
 
+pub struct TransportDraw<'a> {
+    pub layout: Layout,
+    pub show_play_icon: bool,
+    pub label: &'a str,
+}
+
 pub struct Frame<'a> {
     pub image_width: f32,
     pub image_height: f32,
@@ -58,6 +65,7 @@ pub struct Frame<'a> {
     pub pan_y: f32,
     pub dim: bool,
     pub text: Option<&'a str>,
+    pub transport: Option<TransportDraw<'a>>,
     pub scale_factor: f32,
 }
 
@@ -79,7 +87,10 @@ pub struct Gpu {
 }
 
 struct ImageTexture {
+    texture: wgpu::Texture,
     bind: wgpu::BindGroup,
+    width: u32,
+    height: u32,
 }
 
 struct TextLayer {
@@ -92,6 +103,10 @@ struct TextLayer {
     laid_out: String,
     laid_out_width: u32,
     laid_out_scale: f32,
+    bar_buffer: Buffer,
+    bar_laid_out: String,
+    bar_laid_out_width: u32,
+    bar_laid_out_scale: f32,
 }
 
 impl Gpu {
@@ -217,7 +232,7 @@ impl Gpu {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertices"),
-            size: (std::mem::size_of::<Vertex>() * 12) as u64,
+            size: (std::mem::size_of::<Vertex>() * 64) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -314,8 +329,25 @@ impl Gpu {
                 },
             ],
         });
-        self.image = Some(ImageTexture { bind });
+        self.image = Some(ImageTexture {
+            texture,
+            bind,
+            width: image.width,
+            height: image.height,
+        });
         Ok(())
+    }
+
+    /// Upload pixels into the current texture when the size matches, so a video
+    /// frame does not reset zoom. A different size allocates a new texture.
+    pub fn replace_pixels(&mut self, image: &DecodedImage) -> Result<(), String> {
+        if let Some(existing) = &self.image {
+            if existing.width == image.width && existing.height == image.height {
+                upload_rgba(&self.queue, &existing.texture, image);
+                return Ok(());
+            }
+        }
+        self.set_image(image)
     }
 
     pub fn draw(&mut self, frame: Frame<'_>) -> Result<(), String> {
@@ -368,7 +400,7 @@ impl Gpu {
         } else {
             0
         };
-        let dim_start = vertices.len() as u32;
+        let chrome_start = vertices.len() as u32;
         if frame.dim {
             push_quad(
                 &mut vertices,
@@ -382,23 +414,24 @@ impl Gpu {
                 false,
             );
         }
+        if let Some(transport) = &frame.transport {
+            push_transport(&mut vertices, transport, width, height);
+        }
+        let chrome_count = vertices.len() as u32 - chrome_start;
         if !vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
         }
 
-        let text_top = if let Some(text) = frame.text {
-            self.text.prepare(
-                &self.device,
-                &self.queue,
-                text,
-                self.config.width,
-                self.config.height,
-                frame.scale_factor,
-            )
-        } else {
-            None
-        };
+        let draw_text = self.text.prepare(
+            &self.device,
+            &self.queue,
+            frame.text,
+            frame.transport,
+            self.config.width,
+            self.config.height,
+            frame.scale_factor,
+        );
 
         let view = texture
             .texture
@@ -423,7 +456,7 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if image_count > 0 || frame.dim {
+            if image_count > 0 || chrome_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.vertices.slice(..));
             }
@@ -433,11 +466,11 @@ impl Gpu {
                     pass.draw(0..image_count, 0..1);
                 }
             }
-            if frame.dim {
+            if chrome_count > 0 {
                 pass.set_bind_group(0, &self.white_bind, &[]);
-                pass.draw(dim_start..dim_start + 6, 0..1);
+                pass.draw(chrome_start..chrome_start + chrome_count, 0..1);
             }
-            if text_top.is_some() {
+            if draw_text {
                 let _ = self
                     .text
                     .renderer
@@ -460,6 +493,7 @@ impl TextLayer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let mut font_system = FontSystem::new();
         let buffer = Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+        let bar_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
         Self {
             font_system,
             swash_cache: SwashCache::new(),
@@ -470,23 +504,30 @@ impl TextLayer {
             laid_out: String::new(),
             laid_out_width: 0,
             laid_out_scale: 0.0,
+            bar_buffer,
+            bar_laid_out: String::new(),
+            bar_laid_out_width: 0,
+            bar_laid_out_scale: 0.0,
         }
     }
 
-    /// Lay out and prepare text. Returns the top of the block when there is something to draw.
+    /// Lay out overlay text and the optional video-bar label.
     fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        text: &str,
+        text: Option<&str>,
+        transport: Option<TransportDraw<'_>>,
         width: u32,
         height: u32,
         scale_factor: f32,
-    ) -> Option<f32> {
+    ) -> bool {
         let scale = scale_factor.max(1.0);
-        if text != self.laid_out
-            || width != self.laid_out_width
-            || (scale - self.laid_out_scale).abs() > 0.01
+        let overlay = text.unwrap_or("");
+        if text.is_some()
+            && (overlay != self.laid_out
+                || width != self.laid_out_width
+                || (scale - self.laid_out_scale).abs() > 0.01)
         {
             self.buffer.set_wrap(Wrap::Glyph);
             self.buffer.set_metrics_and_size(
@@ -496,22 +537,60 @@ impl TextLayer {
             );
             let attrs = Attrs::new().family(Family::SansSerif);
             self.buffer
-                .set_text(text, &attrs, Shaping::Advanced, Some(Align::Center));
+                .set_text(overlay, &attrs, Shaping::Advanced, Some(Align::Center));
             self.buffer.shape_until_scroll(&mut self.font_system, false);
-            self.laid_out = text.to_string();
+            self.laid_out = overlay.to_string();
             self.laid_out_width = width;
             self.laid_out_scale = scale;
-        } else {
+        } else if text.is_some() {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        let has_bar = transport.is_some();
+        let (bar_label, bar_layout) = match transport {
+            Some(bar) => (bar.label.to_string(), Some(bar.layout)),
+            None => (String::new(), None),
+        };
+        let bar_label = bar_label.as_str();
+        if has_bar
+            && (bar_label != self.bar_laid_out
+                || width != self.bar_laid_out_width
+                || (scale - self.bar_laid_out_scale).abs() > 0.01)
+        {
+            let size = bar_layout.map(|layout| layout.label_size).unwrap_or(16.0);
+            let line = bar_layout.map(|layout| layout.label_line).unwrap_or(20.0);
+            self.bar_buffer.set_wrap(Wrap::None);
+            self.bar_buffer.set_metrics_and_size(
+                Metrics::new(size, line),
+                Some(width as f32),
+                None,
+            );
+            let attrs = Attrs::new().family(Family::SansSerif);
+            self.bar_buffer
+                .set_text(bar_label, &attrs, Shaping::Advanced, Some(Align::Left));
+            self.bar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.bar_laid_out = bar_label.to_string();
+            self.bar_laid_out_width = width;
+            self.bar_laid_out_scale = scale;
+        } else if has_bar {
+            self.bar_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        if text.is_none() && !has_bar {
+            return false;
         }
 
         let mut min_y = f32::MAX;
         let mut max_y = 0.0_f32;
         let mut any = false;
-        for run in self.buffer.layout_runs() {
-            any = true;
-            min_y = min_y.min(run.line_y);
-            max_y = max_y.max(run.line_y + run.line_height);
+        if text.is_some() {
+            for run in self.buffer.layout_runs() {
+                any = true;
+                min_y = min_y.min(run.line_y);
+                max_y = max_y.max(run.line_y + run.line_height);
+            }
         }
         let top = if any {
             ((height as f32) - (max_y - min_y)) / 2.0 - min_y
@@ -520,36 +599,155 @@ impl TextLayer {
         };
 
         self.viewport.update(queue, Resolution { width, height });
-        let area = TextArea {
-            buffer: &self.buffer,
-            left: 0.0,
-            top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: width as i32,
-                bottom: height as i32,
-            },
-            default_color: Color::rgb(255, 255, 255),
-            custom_glyphs: &[],
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
         };
-        if self
-            .renderer
+        let mut areas = Vec::new();
+        if text.is_some() {
+            areas.push(TextArea {
+                buffer: &self.buffer,
+                left: 0.0,
+                top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+        }
+        if let Some(layout) = bar_layout {
+            areas.push(TextArea {
+                buffer: &self.bar_buffer,
+                left: layout.label_x,
+                top: layout.label_top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+        }
+        self.renderer
             .prepare(
                 device,
                 queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [area],
+                areas,
                 &mut self.swash_cache,
             )
-            .is_err()
-        {
-            return None;
-        }
-        Some(top)
+            .is_ok()
+    }
+}
+
+fn push_transport(
+    vertices: &mut Vec<Vertex>,
+    transport: &TransportDraw<'_>,
+    width: f32,
+    height: f32,
+) {
+    let layout = transport.layout;
+    push_quad(
+        vertices,
+        layout.bar.x0,
+        layout.bar.y0,
+        layout.bar.x1,
+        layout.bar.y1,
+        width,
+        height,
+        [0.0, 0.0, 0.0, 0.72],
+        false,
+    );
+    push_quad(
+        vertices,
+        layout.track.x0,
+        layout.track.y0,
+        layout.track.x1,
+        layout.track.y1,
+        width,
+        height,
+        [1.0, 1.0, 1.0, 0.35],
+        false,
+    );
+    if layout.fill.width() > 0.5 {
+        push_quad(
+            vertices,
+            layout.fill.x0,
+            layout.fill.y0,
+            layout.fill.x1,
+            layout.fill.y1,
+            width,
+            height,
+            [1.0, 1.0, 1.0, 0.95],
+            false,
+        );
+    }
+    let button = layout.button;
+    let white = [1.0, 1.0, 1.0, 1.0];
+    if transport.show_play_icon {
+        let inset = button.width() * 0.32;
+        push_triangle(
+            vertices,
+            button.x0 + inset,
+            button.y0 + inset * 0.7,
+            button.x0 + inset,
+            button.y1 - inset * 0.7,
+            button.x1 - inset * 0.75,
+            (button.y0 + button.y1) / 2.0,
+            width,
+            height,
+            white,
+        );
+    } else {
+        let inset_x = button.width() * 0.3;
+        let inset_y = button.height() * 0.28;
+        let gap = button.width() * 0.16;
+        let bar_w = ((button.width() - inset_x * 2.0 - gap) / 2.0).max(1.0);
+        push_quad(
+            vertices,
+            button.x0 + inset_x,
+            button.y0 + inset_y,
+            button.x0 + inset_x + bar_w,
+            button.y1 - inset_y,
+            width,
+            height,
+            white,
+            false,
+        );
+        push_quad(
+            vertices,
+            button.x1 - inset_x - bar_w,
+            button.y0 + inset_y,
+            button.x1 - inset_x,
+            button.y1 - inset_y,
+            width,
+            height,
+            white,
+            false,
+        );
+    }
+}
+
+fn push_triangle(
+    vertices: &mut Vec<Vertex>,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+) {
+    for (x, y) in [(ax, ay), (bx, by), (cx, cy)] {
+        vertices.push(Vertex {
+            pos: ndc(x, y, width, height),
+            uv: [0.5, 0.5],
+            color,
+        });
     }
 }
 

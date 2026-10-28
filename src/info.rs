@@ -3,13 +3,22 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Local};
 use exif::{Error as ExifError, Exif, In, Reader as ExifReader, Tag};
 
+use crate::catalog::is_video;
+use crate::transport::format_clock;
+
 /// Build the text shown when the user presses I.
-pub fn format_image_info(path: &Path, pixels: Option<(u32, u32)>) -> String {
+///
+/// `duration` is the playing length of a video. Photos pass `None`.
+pub fn format_image_info(
+    path: &Path,
+    pixels: Option<(u32, u32)>,
+    duration: Option<Duration>,
+) -> String {
     let mut lines = Vec::new();
     let name = path
         .file_name()
@@ -37,17 +46,21 @@ pub fn format_image_info(path: &Path, pixels: Option<(u32, u32)>) -> String {
         Err(err) => lines.push(format!("Couldn't read the file. {err}")),
     }
 
-    let format = match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => "JPEG",
-        Some("png") => "PNG",
-        _ => "Image",
-    };
-    lines.push(format!("Format {format}"));
+    if is_video(path) {
+        lines.push("Format MP4".into());
+    } else {
+        let format = match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "JPEG",
+            Some("png") => "PNG",
+            _ => "Image",
+        };
+        lines.push(format!("Format {format}"));
+    }
 
     if let Some((width, height)) = pixels {
         lines.push(format!("Pixels {width} × {height}"));
@@ -55,10 +68,19 @@ pub fn format_image_info(path: &Path, pixels: Option<(u32, u32)>) -> String {
         lines.push("Pixels (not loaded yet)".into());
     }
 
-    match read_exif(path) {
-        Ok(exif) => append_exif(&mut lines, &exif),
-        Err(ExifStatus::Missing) => lines.push("No EXIF data".into()),
-        Err(ExifStatus::Error(err)) => lines.push(format!("EXIF unavailable. {err}")),
+    if is_video(path) {
+        match duration {
+            Some(duration) if !duration.is_zero() => {
+                lines.push(format!("Duration {}", format_clock(duration)));
+            }
+            _ => lines.push("Duration unknown".into()),
+        }
+    } else {
+        match read_exif(path) {
+            Ok(exif) => append_exif(&mut lines, &exif),
+            Err(ExifStatus::Missing) => lines.push("No EXIF data".into()),
+            Err(ExifStatus::Error(err)) => lines.push(format!("EXIF unavailable. {err}")),
+        }
     }
 
     lines.push(String::new());
@@ -159,7 +181,11 @@ fn push_tag(lines: &mut Vec<String>, exif: &Exif, label: &str, make: Tag, model:
         (true, true) => return false,
         (false, true) => make.to_string(),
         (true, false) => model.to_string(),
-        (false, false) if model.to_ascii_lowercase().contains(&make.to_ascii_lowercase()) => {
+        (false, false)
+            if model
+                .to_ascii_lowercase()
+                .contains(&make.to_ascii_lowercase()) =>
+        {
             model.to_string()
         }
         (false, false) => format!("{make} {model}"),
@@ -252,12 +278,10 @@ mod tests {
     use image::DynamicImage;
     use std::io::Cursor;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "matejko-info-{label}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("matejko-info-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -309,7 +333,7 @@ mod tests {
             .unwrap();
         std::fs::write(&path, bytes).unwrap();
 
-        let text = format_image_info(&path, Some((3, 2)));
+        let text = format_image_info(&path, Some((3, 2)), None);
         assert!(text.contains("shot.png"), "{text}");
         assert!(text.contains("Format PNG"), "{text}");
         assert!(text.contains("Pixels 3 × 2"), "{text}");
@@ -323,10 +347,24 @@ mod tests {
         let dir = temp_dir("jpeg");
         let path = dir.join("phone.jpg");
         write_jpeg_with_orientation(&path, 6);
-        let text = format_image_info(&path, Some((1, 2)));
+        let text = format_image_info(&path, Some((1, 2)), None);
         assert!(text.contains("phone.jpg"), "{text}");
         assert!(text.contains("Format JPEG"), "{text}");
         assert!(text.contains("Orientation"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn info_describes_an_mp4_without_exif() {
+        let dir = temp_dir("mp4");
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, b"not a real video").unwrap();
+        let text = format_image_info(&path, Some((1920, 1080)), Some(Duration::from_secs(65)));
+        assert!(text.contains("clip.mp4"), "{text}");
+        assert!(text.contains("Format MP4"), "{text}");
+        assert!(text.contains("Pixels 1920 × 1080"), "{text}");
+        assert!(text.contains("Duration 1:05"), "{text}");
+        assert!(!text.contains("EXIF"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

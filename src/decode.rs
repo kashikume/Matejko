@@ -21,6 +21,18 @@ pub enum UserEvent {
     },
     /// The watched folder changed. The app debounces before rescanning.
     FolderDirty,
+    /// A new video frame is waiting in the player. `generation` identifies the
+    /// session that produced it.
+    VideoFrame {
+        generation: u64,
+    },
+    VideoFailed {
+        generation: u64,
+        message: String,
+    },
+    VideoEnded {
+        generation: u64,
+    },
 }
 
 struct Jobs {

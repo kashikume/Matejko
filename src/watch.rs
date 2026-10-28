@@ -30,9 +30,6 @@ pub fn watch_folder(dir: &Path, proxy: EventLoopProxy<UserEvent>) -> Option<Reco
 fn is_interesting(kind: &EventKind) -> bool {
     matches!(
         kind,
-        EventKind::Create(_)
-            | EventKind::Modify(_)
-            | EventKind::Remove(_)
-            | EventKind::Any
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
     )
 }

@@ -18,10 +18,12 @@ use winit::platform::windows::{MonitorHandleExtWindows, WindowAttributesExtWindo
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Fullscreen, Icon, Window};
 
-use crate::catalog::{Catalog, Refresh};
+use crate::catalog::{is_video, Catalog, Refresh};
 use crate::decode::{DecodedImage, Decoder, UserEvent};
-use crate::gpu::{Frame, Gpu};
+use crate::gpu::{Frame, Gpu, TransportDraw};
 use crate::info::format_image_info;
+use crate::playback::VideoSession;
+use crate::transport::{self, Hit};
 use crate::view::{Vec2, View};
 use crate::watch::watch_folder;
 
@@ -39,6 +41,7 @@ pub enum Command {
     Help,
     Info,
     OpenWith,
+    Pause,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +71,7 @@ pub enum Action {
     ShowInfo,
     OpenWith,
     CancelOverlay,
+    TogglePause,
 }
 
 const PAGE_STEP: isize = 10;
@@ -114,6 +118,7 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::Help) => Action::ShowHelp,
         (Mode::Viewing { .. }, Command::Info) => Action::ShowInfo,
         (Mode::Viewing { .. }, Command::OpenWith) => Action::OpenWith,
+        (Mode::Viewing { .. }, Command::Pause) => Action::TogglePause,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
         (Mode::Confirming, Command::Enter) => Action::DoDelete,
@@ -124,17 +129,19 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
 }
 
 const HELP_TEXT: &str = "\
-Left / Right — previous or next image
-Home / End — first or last image
-Page Up / Page Down — jump by 10 images
+Left / Right — previous or next file
+Home / End — first or last file
+Page Up / Page Down — jump by 10 files
 Enter — window or fullscreen
-Delete — delete the image
-I — image information
+Delete — delete the file
+I — file information
 O — open with another app
+Space — pause or play a video
 Escape — cancel, leave fullscreen, or quit
 F1 — help
 Mouse wheel — zoom at the pointer
 Drag — pan
+Video — a bar along the bottom seeks. It hides after the pointer is idle, and stays while paused
 Fullscreen — the pointer hides at once, then returns for 3 seconds when the mouse is used
 
 Esc or F1 to close";
@@ -234,6 +241,11 @@ pub struct App {
     /// as the user using the mouse.
     pointer_anchor: Option<(i32, i32)>,
     stamps: HashMap<PathBuf, FileStamp>,
+    video: Option<VideoSession>,
+    video_stamp: Option<FileStamp>,
+    controls_until: Option<Instant>,
+    transport_drawn: bool,
+    seeking: bool,
     folder_dirty_until: Option<Instant>,
     _watcher: Option<RecommendedWatcher>,
     pub fatal: Option<String>,
@@ -262,6 +274,11 @@ impl App {
             cursor_drawn: true,
             pointer_anchor: None,
             stamps: HashMap::new(),
+            video: None,
+            video_stamp: None,
+            controls_until: None,
+            transport_drawn: false,
+            seeking: false,
             folder_dirty_until: None,
             _watcher: None,
             fatal: None,
@@ -315,14 +332,17 @@ impl App {
             Action::LeaveFullscreen => self.leave_fullscreen(),
             Action::Quit => event_loop.exit(),
             Action::AskDelete => {
+                self.pause_video_for_overlay();
                 self.prompt = Some(Prompt::Delete);
                 self.request_redraw();
             }
             Action::ShowHelp => {
+                self.pause_video_for_overlay();
                 self.prompt = Some(Prompt::Help);
                 self.request_redraw();
             }
             Action::ShowInfo => {
+                self.pause_video_for_overlay();
                 self.prompt = Some(Prompt::Info);
                 self.request_redraw();
             }
@@ -330,8 +350,10 @@ impl App {
             Action::DoDelete => self.delete_current(event_loop),
             Action::CancelOverlay => {
                 self.prompt = None;
+                self.resume_video_after_overlay();
                 self.request_redraw();
             }
+            Action::TogglePause => self.toggle_video_pause(),
         }
     }
 
@@ -478,6 +500,9 @@ impl App {
 
     fn delete_current(&mut self, event_loop: &ActiveEventLoop) {
         let path = self.catalog.current_path();
+        // Close the player first so the file is not locked.
+        let was_video = self.video.is_some();
+        self.stop_video();
         match trash::delete(&path) {
             Ok(()) => {
                 self.cache.remove(&path);
@@ -495,6 +520,12 @@ impl App {
             }
             Err(err) => {
                 self.prompt = Some(Prompt::Failed(err.to_string()));
+                if was_video {
+                    self.sync_playback();
+                    if let Some(video) = &mut self.video {
+                        video.hold_for_overlay();
+                    }
+                }
                 self.request_redraw();
             }
         }
@@ -513,10 +544,14 @@ impl App {
 
     fn sync_images(&mut self) {
         if self.decoder.is_none() || self.catalog.is_empty() {
+            self.stop_video();
             return;
         }
+        self.sync_playback();
         let relevant = self.relevant_paths();
-        self.request_decode(relevant[0].clone(), true);
+        if !is_video(&relevant[0]) {
+            self.request_decode(relevant[0].clone(), true);
+        }
         for path in relevant.iter().skip(1) {
             self.request_decode(path.clone(), false);
         }
@@ -529,7 +564,9 @@ impl App {
                 self.stamps.insert(path.clone(), stamp);
             }
         }
-        self.apply_current();
+        if !is_video(&relevant[0]) {
+            self.apply_current();
+        }
     }
 
     fn note_folder_dirty(&mut self, event_loop: &ActiveEventLoop) {
@@ -591,7 +628,7 @@ impl App {
     }
 
     fn request_decode(&mut self, path: PathBuf, front: bool) {
-        if self.cache.contains_key(&path) {
+        if is_video(&path) || self.cache.contains_key(&path) {
             return;
         }
         let Some(decoder) = &self.decoder else {
@@ -685,7 +722,8 @@ impl App {
                 let pixels = self
                     .image_size()
                     .map(|size| (size.x.round() as u32, size.y.round() as u32));
-                Some(format_image_info(&path, pixels))
+                let duration = self.video.as_ref().and_then(|video| video.duration());
+                Some(format_image_info(&path, pixels, duration))
             }
             Some(Prompt::Delete) => Some(format!(
                 "Delete \"{name}\"?\nEnter to delete, Esc to cancel"
@@ -698,6 +736,179 @@ impl App {
                 .as_ref()
                 .map(|err| format!("{name}\n{err}")),
         }
+    }
+
+    fn sync_playback(&mut self) {
+        if self.catalog.is_empty() || self.gpu.is_none() {
+            self.stop_video();
+            return;
+        }
+        let path = self.catalog.current_path();
+        if !is_video(&path) {
+            self.stop_video();
+            return;
+        }
+        let stamp = read_stamp(&path);
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|video| video.path() == path)
+            && self.video_stamp == stamp
+        {
+            return;
+        }
+        let reload = self
+            .video
+            .as_ref()
+            .is_some_and(|video| video.path() == path);
+        self.stop_video();
+        if reload {
+            self.displayed = None;
+        }
+        let max_edge = self.gpu.as_ref().map(|gpu| gpu.max_edge()).unwrap_or(8192);
+        match VideoSession::open(&path, self.proxy.clone(), max_edge) {
+            Ok(session) => {
+                self.video_stamp = stamp;
+                self.video = Some(session);
+                self.decode_error = None;
+            }
+            Err(err) => self.fail_video(err),
+        }
+    }
+
+    fn stop_video(&mut self) {
+        self.video = None;
+        self.video_stamp = None;
+        self.controls_until = None;
+        self.seeking = false;
+    }
+
+    fn fail_video(&mut self, message: String) {
+        self.stop_video();
+        self.decode_error = Some(message);
+        self.displayed = None;
+        self.shown_size = None;
+        if let Some(gpu) = &mut self.gpu {
+            gpu.clear_image();
+        }
+        self.request_redraw();
+    }
+
+    fn present_video_frame(&mut self, image: DecodedImage) {
+        if self.catalog.is_empty() || !is_video(&self.catalog.current_path()) {
+            return;
+        }
+        let path = self.catalog.current_path();
+        let size = Vec2::new(image.width as f32, image.height as f32);
+        let upload_error = self
+            .gpu
+            .as_mut()
+            .and_then(|gpu| gpu.replace_pixels(&image).err());
+        if let Some(err) = upload_error {
+            self.fail_video(err);
+            return;
+        }
+        let first = self.displayed.as_ref() != Some(&path) || self.shown_size != Some(size);
+        if first {
+            self.view.fit(size, self.window_size);
+            self.displayed = Some(path);
+            self.shown_size = Some(size);
+            self.decode_error = None;
+        }
+        self.request_redraw();
+    }
+
+    fn toggle_video_pause(&mut self) {
+        if let Some(video) = &mut self.video {
+            video.toggle_pause();
+        }
+        self.request_redraw();
+    }
+
+    fn pause_video_for_overlay(&mut self) {
+        if let Some(video) = &mut self.video {
+            video.pause_for_overlay();
+        }
+    }
+
+    fn resume_video_after_overlay(&mut self) {
+        if let Some(video) = &mut self.video {
+            video.resume_after_overlay();
+        }
+    }
+
+    fn transport_visible(&self, now: Instant) -> bool {
+        let Some(video) = &self.video else {
+            return false;
+        };
+        if self.prompt.is_some() {
+            return false;
+        }
+        if video.hold_controls() {
+            return true;
+        }
+        self.controls_until.is_some_and(|until| now < until)
+    }
+
+    fn poke_transport(&mut self) {
+        if self.video.is_none() || self.prompt.is_some() {
+            return;
+        }
+        self.controls_until = Some(Instant::now() + CURSOR_VISIBLE_FOR);
+        if !self.transport_drawn && self.transport_visible(Instant::now()) {
+            self.transport_drawn = true;
+            self.request_redraw();
+        }
+    }
+
+    fn scale_factor(&self) -> f32 {
+        self.window
+            .as_ref()
+            .map(|window| window.scale_factor() as f32)
+            .unwrap_or(1.0)
+    }
+
+    fn transport_layout(&self) -> Option<transport::Layout> {
+        let video = self.video.as_ref()?;
+        let (position, duration) = video.timeline();
+        Some(transport::layout(
+            self.window_size.x,
+            self.window_size.y,
+            self.scale_factor(),
+            transport::fraction(position, duration),
+        ))
+    }
+
+    fn transport_hit(&self) -> Option<Hit> {
+        if !self.cursor_valid || !self.transport_visible(Instant::now()) {
+            return None;
+        }
+        let layout = self.transport_layout()?;
+        transport::hit(&layout, self.cursor.x, self.cursor.y)
+    }
+
+    fn seek_video_at(&mut self, x: f32) {
+        let Some(layout) = self.transport_layout() else {
+            return;
+        };
+        let fraction = transport::fraction_at(&layout, x);
+        if let Some(video) = &mut self.video {
+            video.seek_fraction(fraction);
+        }
+        self.request_redraw();
+    }
+
+    fn transport_draw<'a>(&self, label: Option<&'a str>) -> Option<TransportDraw<'a>> {
+        let video = self.video.as_ref()?;
+        let label = label?;
+        if !self.transport_visible(Instant::now()) {
+            return None;
+        }
+        Some(TransportDraw {
+            layout: self.transport_layout()?,
+            show_play_icon: video.show_play_icon(),
+            label,
+        })
     }
 
     fn resize_to(&mut self, size: PhysicalSize<u32>) {
@@ -758,10 +969,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if self
-            .folder_dirty_until
-            .is_some_and(|until| now >= until)
-        {
+        if self.folder_dirty_until.is_some_and(|until| now >= until) {
             self.folder_dirty_until = None;
             self.apply_folder_changes(event_loop);
             if self.fatal.is_some() || self.catalog.is_empty() {
@@ -777,10 +985,28 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_cursor(false);
         }
 
+        let bar = self.transport_visible(now);
+        if bar != self.transport_drawn {
+            self.transport_drawn = bar;
+            self.request_redraw();
+        }
+
         let mut wake_at = self.folder_dirty_until;
         if fullscreen {
             if let Some(until) = self.cursor_visibility.wake_at() {
                 wake_at = Some(wake_at.map_or(until, |existing| existing.min(until)));
+            }
+        }
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|video| !video.hold_controls())
+            && self.prompt.is_none()
+        {
+            if let Some(until) = self.controls_until {
+                if now < until {
+                    wake_at = Some(wake_at.map_or(until, |existing| existing.min(until)));
+                }
             }
         }
         match wake_at {
@@ -807,6 +1033,40 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.apply_current();
                 self.request_redraw();
+            }
+            UserEvent::VideoFrame { generation } => {
+                let image = {
+                    let Some(video) = &self.video else {
+                        return;
+                    };
+                    if video.generation() != generation {
+                        return;
+                    }
+                    video.take_frame()
+                };
+                if let Some(image) = image {
+                    self.present_video_frame(image);
+                }
+            }
+            UserEvent::VideoFailed {
+                generation,
+                message,
+            } => {
+                let current = self
+                    .video
+                    .as_ref()
+                    .is_some_and(|video| video.generation() == generation);
+                if current {
+                    self.fail_video(message);
+                }
+            }
+            UserEvent::VideoEnded { generation } => {
+                if let Some(video) = &mut self.video {
+                    if video.generation() == generation {
+                        video.mark_ended();
+                        self.request_redraw();
+                    }
+                }
             }
         }
     }
@@ -835,6 +1095,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.note_mouse();
+                self.poke_transport();
                 if !self.image_shown() {
                     return;
                 }
@@ -858,15 +1119,46 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.note_mouse();
+                self.poke_transport();
                 if button != MouseButton::Left {
                     return;
                 }
-                self.dragging = state == ElementState::Pressed;
+                if state != ElementState::Pressed {
+                    self.dragging = false;
+                    self.seeking = false;
+                    return;
+                }
+                match self.transport_hit() {
+                    Some(Hit::Button) => {
+                        self.dragging = false;
+                        self.seeking = false;
+                        self.toggle_video_pause();
+                    }
+                    Some(Hit::Track(fraction)) => {
+                        self.dragging = false;
+                        self.seeking = true;
+                        if let Some(video) = &mut self.video {
+                            video.seek_fraction(fraction);
+                        }
+                        self.request_redraw();
+                    }
+                    Some(Hit::Chrome) => {
+                        self.dragging = false;
+                        self.seeking = false;
+                    }
+                    None => {
+                        self.seeking = false;
+                        self.dragging = true;
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.note_pointer_motion();
+                self.poke_transport();
                 let next = Vec2::new(position.x as f32, position.y as f32);
-                if self.dragging && self.cursor_valid && self.image_shown() {
+                if self.seeking {
+                    self.seek_video_at(next.x);
+                } else if self.dragging && self.cursor_valid && self.image_shown() {
                     self.view
                         .pan_by(Vec2::new(next.x - self.cursor.x, next.y - self.cursor.y));
                     self.request_redraw();
@@ -876,15 +1168,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 let text = self.overlay_text();
-                let scale_factor = self
-                    .window
-                    .as_ref()
-                    .map(|window| window.scale_factor() as f32)
-                    .unwrap_or(1.0);
+                let scale_factor = self.scale_factor();
                 let (image_width, image_height) = self
                     .image_size()
                     .map(|size| (size.x, size.y))
                     .unwrap_or((0.0, 0.0));
+                let label = self.video.as_ref().map(|video| {
+                    let (position, duration) = video.timeline();
+                    transport::format_clock_range(position, duration)
+                });
+                let transport = self.transport_draw(label.as_deref());
                 let frame = Frame {
                     image_width,
                     image_height,
@@ -893,6 +1186,7 @@ impl ApplicationHandler<UserEvent> for App {
                     pan_y: self.view.pan.y,
                     dim: self.prompt.is_some(),
                     text: text.as_deref(),
+                    transport,
                     scale_factor,
                 };
                 let Some(gpu) = &mut self.gpu else {
@@ -921,6 +1215,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::F1) => Some(Command::Help),
         Key::Character(ch) if ch.eq_ignore_ascii_case("i") => Some(Command::Info),
         Key::Character(ch) if ch.eq_ignore_ascii_case("o") => Some(Command::OpenWith),
+        Key::Named(NamedKey::Space) => Some(Command::Pause),
         _ => None,
     }
 }
@@ -1061,18 +1356,12 @@ mod tests {
         assert_eq!(action_for(Command::Right, viewing, true), Action::Next);
         assert_eq!(action_for(Command::Home, viewing, false), Action::First);
         assert_eq!(action_for(Command::End, viewing, false), Action::Last);
-        assert_eq!(
-            action_for(Command::PageUp, viewing, true),
-            Action::PageBack
-        );
+        assert_eq!(action_for(Command::PageUp, viewing, true), Action::PageBack);
         assert_eq!(
             action_for(Command::PageDown, viewing, false),
             Action::PageForward
         );
-        assert_eq!(
-            action_for(Command::Home, Mode::Help, false),
-            Action::None
-        );
+        assert_eq!(action_for(Command::Home, Mode::Help, false), Action::None);
         assert_eq!(
             action_for(Command::Enter, viewing, false),
             Action::ToggleFullscreen
@@ -1157,6 +1446,17 @@ mod tests {
             action_for(Command::OpenWith, Mode::Confirming, false),
             Action::None
         );
+        assert_eq!(
+            action_for(Command::Pause, viewing, false),
+            Action::TogglePause
+        );
+        assert_eq!(action_for(Command::Pause, viewing, true), Action::None);
+        assert_eq!(action_for(Command::Pause, Mode::Help, false), Action::None);
+        assert_eq!(
+            action_for(Command::Pause, Mode::Confirming, false),
+            Action::None
+        );
+        assert_eq!(action_for(Command::Left, viewing, false), Action::Previous);
     }
 
     #[test]

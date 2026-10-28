@@ -5,6 +5,8 @@ mod catalog;
 mod decode;
 mod gpu;
 mod info;
+mod playback;
+mod transport;
 mod view;
 mod watch;
 
@@ -42,10 +44,12 @@ fn run() -> Result<(), String> {
 fn image_argument() -> Result<std::ffi::OsString, String> {
     let mut args = std::env::args_os().skip(1);
     let Some(path) = args.next() else {
-        return Err("Open Matejko with one JPEG or PNG file.\n\nmatejko.exe photo.jpg".into());
+        return Err(
+            "Open Matejko with one JPEG, PNG, or MP4 file.\n\nmatejko.exe photo.jpg".into(),
+        );
     };
     if args.next().is_some() {
-        return Err("Matejko accepts one image path.".into());
+        return Err("Matejko accepts one file path.".into());
     }
     Ok(path)
 }

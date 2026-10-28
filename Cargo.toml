@@ -19,6 +19,19 @@ pollster = "0.4"
 trash = "5"
 wgpu = "30"
 winit = "0.30.13"
+windows = { version = "0.61.3", features = [
+    "Foundation",
+    "Graphics_DirectX_Direct3D11",
+    "Media_Core",
+    "Media_MediaProperties",
+    "Media_Playback",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+] }
 
 [build-dependencies]
 winresource = "0.1"
