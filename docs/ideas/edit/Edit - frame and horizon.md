@@ -39,15 +39,7 @@ sy = −sin(θ) · dx + cos(θ) · dy + cy
 
 `(sx, sy)` is where the sample comes from. The kernel is Catmull–Rom, a cubic on the 4×4 neighborhood. A source coordinate outside the baseline is outside the usable picture and is not part of the frame.
 
-θ = 0 skips the resample. The picture is unchanged.
-
-A drag along a line that should become the horizon sets the angle. For a stroke from `(x0, y0)` to `(x1, y1)`, with y pointing down the screen:
-
-```
-θ = −atan2(y1 − y0, x1 − x0)
-```
-
-The result is clamped to ±45°.
+θ = 0 skips the resample. The picture is unchanged. The angle comes from the rotation slider.
 
 ## Usable rectangle
 
@@ -93,13 +85,13 @@ height = h · hr
 
 An aspect lock, when it is on, fits one of these ratios inside the usable rectangle and keeps that ratio while the frame is dragged: free, the baseline's own ratio, 1:1, 4:5, 3:2, 16:9. Free is the default. The lock changes `w` and `h` together. It does not change θ.
 
-On the picture, the frame is the bright rectangle and the discarded margin is dimmed. The empty corners left by the rotation are part of that margin. They are not a place the frame can sit. The panel can show the angle. The rectangle itself is edited on the picture, and each drag snaps as above.
+On the picture, the frame is the bright rectangle and the discarded margin is dimmed. The empty corners left by the rotation are part of that margin. They are not a place the frame can sit. The rectangle itself is edited on the picture, and each drag snaps as above. The same angle is a slider on the panel, in the Frame group, −45° to +45°.
 
 ## Parameters
 
 | Symbol | Meaning | Starting value |
 | --- | --- | --- |
-| `horizon_deg` | Rotation, degrees, counterclockwise on screen | 0 |
+| `rotation` | Degrees, counterclockwise on screen | 0 |
 | range | Clamp on the angle | −45…+45 |
 | `x`, `y` | Top-left of the frame, fraction of the usable rectangle | 0, 0 |
 | `w`, `h` | Size of the frame, fraction of the usable rectangle | 1, 1 |
@@ -109,7 +101,7 @@ On the picture, the frame is the bright rectangle and the discarded margin is di
 ## Failure cases worth testing against
 
 - θ = 0 and a full frame. The render matches the tone pipeline output, pixel for pixel. A resample at zero means the skip was missed.
-- A horizon stroke that is already horizontal. θ stays 0.
+- Moving the rotation slider to 10°. The whole picture turns counterclockwise and the frame stays upright.
 - θ = 10° on a 4:3 phone JPEG. Every output pixel is a photo pixel. An empty corner inside the frame means a drag crossed the rotated border without snapping.
 - Dragging the right edge outward at θ = 10°. The edge meets the rotated photo and stays on that border. A gap between the edge and the border, while the drag is still outward, means the snap stopped early. A black triangle inside the edge means it did not stop.
 - The same crop fractions at θ = 0 and θ = 10°. Both fill their frame. The 10° frame is the smaller inscribed rectangle, not the baseline with black corners.

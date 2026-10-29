@@ -4,7 +4,7 @@ Status: draft. Not part of the viewer. Open points are at the end.
 
 Edit mode is a second state of the same window, for a quick correction of a camera photo. The files in mind are JPEGs from phones. The app remains a viewer. E enters edit mode on a JPEG. That key does nothing today, and it does nothing on a PNG.
 
-The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the tone controls, and JPEG quality at the bottom. Save and Exit are buttons on that panel. The split starts with the picture at about three quarters of the width, and the divider drags. Horizon and the frame are edited on the picture: a line along the horizon sets the angle, and the kept rectangle is dragged there. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed.
+The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the sliders in four groups: Light, Color, Detail, and Frame. JPEG quality is at the bottom. Save, Save as copy, and Exit are buttons on that panel. Four small buttons sit with them, in one row: O, Of, S, and Sf. The split starts with the picture at about three quarters of the width, and the divider drags. Rotation is the slider in Frame, from −45° to +45°. It turns the whole picture. The kept rectangle is dragged on the picture. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed. Guides can be drawn over the picture. They are not adjustments and they are not saved. `Edit - screen guides.md`. The layout is drawn in `Edit - wireframe.canvas.tsx`.
 
 ## What is edited
 
@@ -14,21 +14,24 @@ The session decodes the **baseline** file, not the file the browser is showing, 
 
 ## Files
 
-A folder the user is browsing:
+A folder the user is browsing, after `myimage.jpg` was opened and saved as a copy named `myimage_ver2.jpg`:
 
 ```
 holiday/
-  photo.jpg
+  myimage.jpg
+  myimage_ver2.jpg
   .matejko/
-    photo.jpg
-    photo.jpg.matejko_adj
+    myimage.jpg
+    myimage_ver2.matejko_adj
 ```
 
-`holiday/photo.jpg` is the file in the browse list. A render may replace it.
+`holiday/myimage.jpg` is the file that was opened. It is still the camera file. Save as copy does not replace it.
 
-`.matejko/photo.jpg` is a byte-for-byte copy of the file as it was when editing started. It is the baseline. Later renders do not touch it.
+`holiday/myimage_ver2.jpg` is the rendered copy.
 
-`.matejko/photo.jpg.matejko_adj` is the adjustments, JSON. The original extension stays in the name so `photo.jpg` and `photo.jpeg` do not share one sidecar.
+`.matejko/myimage.jpg` is a byte-for-byte copy of that camera file. It is the baseline. Later renders do not touch it, and a later version does not add a second one.
+
+`.matejko/myimage_ver2.matejko_adj` is the adjustments for the copy, JSON. The adj name is the saved file's name with `.jpg` or `.jpeg` removed, then `.matejko_adj`. The file name of the baseline is stored inside the adj, so another version can point at the same `myimage.jpg`.
 
 The viewer watches the image's parent and not its children, so the copies inside `.matejko` stay out of the browse list. Windows does not hide a folder whose name starts with a dot. The folder is visible in Explorer.
 
@@ -36,26 +39,33 @@ The viewer watches the image's parent and not its children, so the copies inside
 
 Slider moves stay in the session. They update the preview and the histogram. They do not write a file.
 
-Save is what writes. Entering edit mode and leaving it, with nothing saved, writes nothing.
+Save and Save as copy are what write. Entering edit mode and leaving it, with nothing saved, writes nothing.
 
-Save does this in order:
+The session's original is the file name in the adj that was opened, when there is one. With no adj, the original is the name of the file that was opened. The baseline path is `.matejko/` plus that name.
+
+Save writes over the file that is open. It does this in order:
 
 1. If `.matejko` does not exist, create it.
-2. If the baseline copy does not exist, copy the browsed file's bytes into it. This happens before the render replaces that browsed file. A later save leaves the baseline where it is.
-3. Write the adj file from the controls as they are now.
-4. Render the baseline plus that adj over the browsed file, `holiday/photo.jpg`.
+2. If the baseline does not exist, and the open file is the original, copy that file's bytes to `.matejko/<original>`. This happens before the render replaces the open file. A later save leaves the baseline where it is.
+3. Write `.matejko/<stem of the open file>.matejko_adj` from the controls as they are now. Its `original` field is the original file name.
+4. Render the baseline plus that adj over the open file.
 
-On a later visit, baseline and adj both present: decode the baseline, apply the adj. The browsed file is ignored for the edit session, even when it is a previous render of these same numbers. Applying the adj to the render would bake the edit twice.
+Save as copy asks for a file name in the same folder and writes a new JPEG there. The open file is left as it is. The same first two steps create the baseline when the open file is still the untouched original. The adj is `.matejko/<stem of the new name>.matejko_adj`, and its `original` field is that same original file name. The render goes to the new name. A second version adds another JPEG and another adj, and the baseline stays the one file. If the chosen name is already in the folder, the user confirms before that JPEG and its adj are replaced.
 
-Adj present, baseline missing: do not apply the adj to the browsed file. Editing needs the baseline.
+On a later visit, adj and baseline both present: decode `.matejko/<original>`, apply the adj. The browsed file is ignored for the edit session, even when it is a previous render of these same numbers. Applying the adj to the render would bake the edit twice.
 
-Baseline present, adj missing: start from the baseline with every image control at default, and with `jpeg_quality` set from that baseline as below.
+Adj present, baseline missing: do not apply the adj to the browsed file, and do not create a baseline from that render. Editing needs the baseline.
+
+No adj, baseline present under the open file's name: start from that baseline with every image control at default, and with `jpeg_quality` set from that baseline as below.
+
+No adj and no baseline: the open file is the original. Decode it. The baseline is created on the first Save or Save as copy.
 
 ### Adj file
 
 ```json
 {
   "version": 1,
+  "original": "myimage.jpg",
   "adjustments": {
     "quarter_turns": 0,
     "mirror_horizontal": false,
@@ -69,24 +79,40 @@ Baseline present, adj missing: start from the baseline with every image control 
     "vibrance": 0,
     "saturation": 0,
     "clarity": 0,
-    "horizon_deg": 0.0,
+    "rotation": 0.0,
     "frame": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
     "jpeg_quality": 90
   }
 }
 ```
 
-`version` is 1. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for horizon, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
+`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
 
 One value per control, in the pipeline order below. The stack is that pipeline, run from the baseline. It is not a list the user reorders, and it is not one entry per slider twitch. JPEG quality is stored with them and is not a stage in that stack.
 
 ### Save
 
-Save renders into the original file and writes the adj file, in the order above. The baseline stays. The folder watcher will see the write to `holiday/photo.jpg`. During the edit session that event does not reload the session. The session stays in edit mode, and those control values count as saved.
+Save renders into the file that is open and writes that file's adj, in the order above. Save as copy renders into the new name and writes that name's adj. The baseline stays. The folder watcher will see the new JPEG or the write over the open file. During the edit session that event does not reload the session and does not switch which file is open. The session stays in edit mode, and the control values written by that action count as saved for the file it wrote.
 
 JPEG output is 8-bit sRGB, written at `jpeg_quality`.
 
-**Render to another name.** Write the encoded image at the chosen path. Also copy the baseline and the adj into `.matejko` under that new name, so the new file can be edited again from the same baseline. The current session stays on the file the user was editing. This is not Save. Save always targets the file that was open.
+### Compare
+
+S is the last save of the file that is open. That is the adj loaded at the start of the session, or the controls written by the latest Save, whichever is newer. A file that has never been saved has no last save, and S and Sf do nothing until Save. Save as copy writes another file. It does not change the last save of the file that is still open.
+
+The picture shows the current controls unless one of those buttons is held. O is Original, Of is Original with this rotation and frame, S is the last save, and Sf is the last save with this rotation and frame. There is no Current button. Releasing the button shows the current controls again. Holding one does not change those controls. Save and Save as copy write the current controls. A picture that is only being looked at is not what gets saved.
+
+| View | Tone controls | Quarter turns, mirrors, rotation, frame |
+| --- | --- | --- |
+| Current | Current | Current |
+| Original | Defaults | Defaults. Rotation is 0 and the frame is the whole picture. |
+| Last save | Last save | Last save |
+| Original with this rotation and frame | Defaults | Current |
+| Last save with this rotation and frame | Last save | Current |
+
+Original is the baseline with every image control at default. The two "this rotation and frame" views use the current quarter turns and mirrors as well as the current rotation and frame, so the photo is the same way up and the same crop is on screen. Tone is the only thing that changes between those two and the current view.
+
+Zoom and pan stay where they are while a button is held, so the same spot can be compared. The histogram follows the picture on screen.
 
 ## Pixels
 
@@ -150,7 +176,7 @@ Each preview and each render is one run. A control at its default is skipped. Th
 
 ### Orient
 
-Buttons, not sliders. Mirror horizontal and mirror vertical each toggle. Rotate 90° clockwise adds one quarter turn. Rotate 180° adds two. `quarter_turns` is stored modulo 4, so four clockwise turns return to the decoded picture.
+Buttons, not sliders. Mirror horizontal and mirror vertical each toggle. One button rotates 90° clockwise and adds one quarter turn. A half turn is that button twice. `quarter_turns` is stored modulo 4, so four clicks return to the decoded picture.
 
 This runs before exposure, on the baseline. The tone filters then see the pixels in the orientation the user is editing. A 90° turn here is exact. It is not the horizon angle, which is a small resample at the end.
 
@@ -197,11 +223,11 @@ code = clamp(code, 0, 255)
 
 `triangular_noise` is the sum of two independent uniform draws from `−0.5` to `+0.5`, so it lies in `−1…+1` in units of one code. The noise is what keeps a smooth sky from banding when the float result is finer than 8 bits. The GPU preview is these codes, with alpha opaque. The preview does not pass through a JPEG encoder, so moving the quality slider does not change the picture or the histogram.
 
-The written file is these codes, 8-bit sRGB, encoded at `jpeg_quality`. The scale is 1…100. Sampling is 4:4:4 at every step of that scale, so the slider changes the quantization and does not also throw away chroma. Replace and render-to-name both use the stored value.
+The written file is these codes, 8-bit sRGB, encoded at `jpeg_quality`. The scale is 1…100. Sampling is 4:4:4 at every step of that scale, so the slider changes the quantization and does not also throw away chroma. Save and Save as copy both use the stored value.
 
 A JPEG does not store that 1…100 integer. It stores quantization tables. The integer is the Independent JPEG Group quality factor: the same scale `JpegEncoder::new_with_quality` writes. On a first edit, with no adj file, the slider starts at the factor that best matches the baseline's luminance table. For each candidate `q` from 1 to 100, build the table the encoder would write and sum the absolute difference against the file's 64 luminance entries. The `q` with the smallest sum wins. A tie keeps the higher `q`. A file with no usable luminance table starts at 90. An adj file that already stores `jpeg_quality` keeps that stored integer.
 
-A render where every image control is at default, both mirrors are off, `quarter_turns` is 0, the horizon is 0, the frame is the whole picture, and `jpeg_quality` is still that starting factor copies the baseline JPEG bytes and does not run this quantize. Re-encoding an untouched phone JPEG would lose more than the pipeline had changed. A different quality, with the image controls still at default, does encode: the user asked for a different file. Encoding uses the IJG tables for the chosen factor. A phone's own tables survive only in that byte copy.
+A render where every image control is at default, both mirrors are off, `quarter_turns` is 0, `rotation` is 0, the frame is the whole picture, and `jpeg_quality` is still that starting factor copies the baseline JPEG bytes and does not run this quantize. Re-encoding an untouched phone JPEG would lose more than the pipeline had changed. A different quality, with the image controls still at default, does encode: the user asked for a different file. Encoding uses the IJG tables for the chosen factor. A phone's own tables survive only in that byte copy.
 
 A rendered JPEG is written with orientation normal. The pixels are already upright. Leaving the original orientation tag on the new file would rotate them again in the viewer.
 
