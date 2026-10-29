@@ -36,7 +36,7 @@ Blackpoint is the other control in the group. It chooses which input values coun
 
 Shadows and Highlights, the next stage, move the dark end and the light end by different amounts. Exposure has already slid both ends by the same number of stops.
 
-Order, shared with the other notes: Exposure on scene-linear samples, then Blackpoint, then Shadows and Highlights, then Brightness on encoded channels, then Contrast, then Vibrance, then Saturation, then Clarity.
+Order, shared with the other notes: White balance on scene-linear samples, then Exposure, then Blackpoint, then Shadows and Highlights, then Brightness on encoded channels, then Contrast, then Vibrance, then Saturation, then Clarity.
 
 ## Linear light
 

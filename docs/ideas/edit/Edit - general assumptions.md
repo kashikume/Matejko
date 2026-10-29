@@ -4,7 +4,7 @@ Status: draft. Not part of the viewer. Open points are at the end.
 
 Edit mode is a second state of the same window, for a quick correction of a camera photo. The files in mind are JPEGs from phones. The app remains a viewer. E enters edit mode on a JPEG. That key does nothing today, and it does nothing on a PNG.
 
-The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the sliders in four groups: Light, Color, Detail, and Frame. JPEG quality is at the bottom. Save, Save as copy, and Exit are buttons on that panel. Four small buttons sit with them, in one row: O, Of, S, and Sf. The split starts with the picture at about three quarters of the width, and the divider drags. Rotation is the slider in Frame, from −45° to +45°. It turns the whole picture. The kept rectangle is dragged on the picture. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed. Guides can be drawn over the picture. They are not adjustments and they are not saved. `Edit - screen guides.md`. The layout is drawn in `Edit - wireframe.canvas.tsx`.
+The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the sliders in four groups: Light, Color, Detail, and Frame. JPEG quality is at the bottom. Save, Save as copy, and Exit are buttons on that panel. Four small buttons sit with them, in one row: O, Of, S, and Sf. The split starts with the picture at about three quarters of the width, and the divider drags. Rotation is the slider in Frame, from −45° to +45°. It turns the whole picture. A button beside it cycles the frame's shape: Original, Free, 3:2, 2:3, and the other ratios in the frame note. Each click fits the largest rectangle of that shape that still lies on the rotated photo. The kept rectangle is dragged on the picture. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed. Guides can be drawn over the picture. They are not adjustments and they are not saved. `Edit - screen guides.md`. The layout is drawn in `Edit - wireframe.canvas.tsx`.
 
 ## What is edited
 
@@ -70,6 +70,8 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "quarter_turns": 0,
     "mirror_horizontal": false,
     "mirror_vertical": false,
+    "temperature": 0,
+    "tint": 0,
     "exposure_ev": 0.0,
     "blackpoint": 0.0,
     "shadow": 0,
@@ -80,13 +82,14 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "saturation": 0,
     "clarity": 0,
     "rotation": 0.0,
+    "aspect": "original",
     "frame": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
     "jpeg_quality": 90
   }
 }
 ```
 
-`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
+`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `aspect` is `original`, `free`, or one of the ratios in the frame note. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
 
 One value per control, in the pipeline order below. The stack is that pipeline, run from the baseline. It is not a list the user reorders, and it is not one entry per slider twitch. JPEG quality is stored with them and is not a stage in that stack.
 
@@ -102,7 +105,7 @@ S is the last save of the file that is open. That is the adj loaded at the start
 
 The picture shows the current controls unless one of those buttons is held. O is Original, Of is Original with this rotation and frame, S is the last save, and Sf is the last save with this rotation and frame. There is no Current button. Releasing the button shows the current controls again. Holding one does not change those controls. Save and Save as copy write the current controls. A picture that is only being looked at is not what gets saved.
 
-| View | Tone controls | Quarter turns, mirrors, rotation, frame |
+| View | White balance, tone, and color | Quarter turns, mirrors, rotation, frame |
 | --- | --- | --- |
 | Current | Current | Current |
 | Original | Defaults | Defaults. Rotation is 0 and the frame is the whole picture. |
@@ -164,19 +167,20 @@ Each preview and each render is one run. A control at its default is skipped. Th
 
 | Order | Stage | Work buffer | Note |
 | 1 | Orient | New linear buffer, one source pixel per output pixel. No resample. | Below |
-| 2 | Exposure | In place. `L = L · 2^ev`. No clamp at 1. | `Edit - exposure.md` |
-| 3 | Blackpoint | In place, per channel, one shared threshold. | `Edit - blackpoint.md` |
-| 4 | Shadow, Highlight | Neighborhood reads. A new linear buffer becomes work. Luma scratch is binary32. | `Edit - shadows and highlights.md` |
-| 5 | Brightness | Encode, formula, decode, as above. | `Edit - brightness.md` |
-| 6 | Contrast | Encode, formula, decode. | `Edit - contrast.md` |
-| 7 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
-| 8 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
-| 9 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
-| 10–11 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
+| 2 | White balance | In place. A 3×3 matrix on linear RGB. No clamp at 1. | `Edit - white balance.md` |
+| 3 | Exposure | In place. `L = L · 2^ev`. No clamp at 1. | `Edit - exposure.md` |
+| 4 | Blackpoint | In place, per channel, one shared threshold. | `Edit - blackpoint.md` |
+| 5 | Shadow, Highlight | Neighborhood reads. A new linear buffer becomes work. Luma scratch is binary32. | `Edit - shadows and highlights.md` |
+| 6 | Brightness | Encode, formula, decode, as above. | `Edit - brightness.md` |
+| 7 | Contrast | Encode, formula, decode. | `Edit - contrast.md` |
+| 8 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
+| 9 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
+| 10 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
+| 11–12 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
 
 ### Orient
 
-Buttons, not sliders. Mirror horizontal and mirror vertical each toggle. One button rotates 90° clockwise and adds one quarter turn. A half turn is that button twice. `quarter_turns` is stored modulo 4, so four clicks return to the decoded picture.
+Buttons, not sliders. Mirror horizontal and mirror vertical each toggle. One button rotates 90° clockwise and adds one quarter turn. A half turn is that button twice. `quarter_turns` is stored modulo 4, so four clicks return to the decoded picture. The frame and its shape turn with the picture: `3:2` becomes `2:3`, and the other ratios swap the same way. `Edit - frame and horizon.md`.
 
 This runs before exposure, on the baseline. The tone filters then see the pixels in the orientation the user is editing. A 90° turn here is exact. It is not the horizon angle, which is a small resample at the end.
 
@@ -208,9 +212,11 @@ Horizon and frame share one resample, after clarity. Sampling reads backward wit
 
 ### Preview
 
-The session keeps the full-resolution baseline. The interactive run does not use it directly. Once per session the baseline is area-averaged, in linear light, into a smaller baseline whose long side is capped. Slider changes rerun the pipeline on that smaller image. The cap size is still open. The render run uses the full baseline.
+The session keeps the full-resolution baseline. Once per session that baseline is area-averaged, in linear light, into a drag image whose long side is 1600. A photo already shorter than that on its long side uses the full baseline for both runs.
 
-Clarity's radius and the shadow filter's radius are defined in pixels of the oriented image they run on. The preview multiplies those pixel radii by the preview's oriented width divided by the full image's oriented width. A preview that shrinks the image and keeps the full-resolution radii does not match the render.
+While a slider or the frame is moving, the pipeline runs on the drag image. The picture and the histogram follow that run. Releasing the control runs the pipeline again on the full baseline, and the picture and the histogram are replaced by that result. Save uses this same full run. A click, such as 90° or the shape button, runs the full baseline directly.
+
+Clarity's radius and the shadow filter's radius are defined in pixels of the oriented image they run on. The drag run multiplies those pixel radii by the drag image's oriented width divided by the full image's oriented width. The full run uses the unscaled radii.
 
 ### Eight-bit output
 
@@ -229,7 +235,7 @@ A JPEG does not store that 1…100 integer. It stores quantization tables. The i
 
 A render where every image control is at default, both mirrors are off, `quarter_turns` is 0, `rotation` is 0, the frame is the whole picture, and `jpeg_quality` is still that starting factor copies the baseline JPEG bytes and does not run this quantize. Re-encoding an untouched phone JPEG would lose more than the pipeline had changed. A different quality, with the image controls still at default, does encode: the user asked for a different file. Encoding uses the IJG tables for the chosen factor. A phone's own tables survive only in that byte copy.
 
-A rendered JPEG is written with orientation normal. The pixels are already upright. Leaving the original orientation tag on the new file would rotate them again in the viewer.
+A rendered JPEG carries the baseline's EXIF. The orientation tag is normal, because the pixels are already upright, and the pixel-size tags match the written image. Every other tag stays, including the taken time, the camera, and GPS. The Software tag keeps its existing text. `edited with Matejko` is added to it, once. A file whose Software tag is empty gets that phrase alone. The byte-copy path leaves the baseline EXIF untouched, because that file was not re-encoded.
 
 ## Histogram
 
@@ -246,7 +252,7 @@ The triangular noise is not added here. Adding it would move counts between neig
 
 The tallest bin of any channel fills the height of the plot. The other bins scale linearly with it. Bin 0 is the left edge and bin 255 is the right edge, so a pile on the left is the black floor and a pile on the right is clipped white. A gap between the left edge and the first occupied bin is the room a positive blackpoint would close.
 
-The histogram is rebuilt at the end of the same run that updates the picture. The interactive run counts the preview image. The render run does not draw a second histogram.
+The histogram is rebuilt at the end of the same run that updates the picture. While a control is moving it counts the drag image. After the release it counts the full run. Save does not draw a second histogram.
 
 ## Leaving edit mode
 
@@ -256,9 +262,8 @@ Esc does not leave edit mode, and it does not quit the app from there. In the vi
 
 Exit with nothing unsaved returns to viewing. The browsed file is whatever Save last wrote, or the file that was opened if Save was never used.
 
-A control that differs from the last save is unsaved. If Save has not been used this visit, a control that differs from the loaded adj, or from the defaults when there was no adj, is unsaved. Exit then asks before leaving. Confirming discards the unsaved values and returns to viewing. The files on disk stay as they were at the last save. Dismissing the question stays in edit mode with the values still in the session.
+A control that differs from the last save is unsaved. If Save has not been used this visit, a control that differs from the loaded adj, or from the defaults when there was no adj, is unsaved. Exit then asks before leaving. Confirming discards the unsaved values and returns to viewing. The picture there is the last save, the same state S shows: the file Save last wrote, or the file that was opened when nothing has been saved. There is no control that copies S back onto the sliders while edit mode stays open. Dismissing the question stays in edit mode with the values still in the session.
 
 ## Open
 
-1. **Highlight recovery on phone JPEGs.** The shadow note rebuilds a clipped channel from its neighbors. A phone JPEG has usually already clipped and thrown the extra samples away, so recovery only helps pixels that are still short of the ceiling. Many phones also write HEIC, which the viewer does not open. Raw is out of scope unless that changes.
-2. **How small the interactive preview may be** before the picture on screen is no longer a fair stand-in for the render.
+**Highlight recovery on phone JPEGs.** The shadow note rebuilds a clipped channel from its neighbors. A phone JPEG has usually already clipped and thrown the extra samples away, so recovery only helps pixels that are still short of the ceiling. Many phones also write HEIC, which the viewer does not open. Raw is out of scope unless that changes.

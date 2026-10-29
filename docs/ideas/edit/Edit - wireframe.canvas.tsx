@@ -11,7 +11,91 @@ import {
 
 const VIEWBOX = { w: 640, h: 480 };
 const PHOTO = { x: 48, y: 36, w: 544, h: 408 };
-const CROP = { x: 108, y: 84, w: 424, h: 300 };
+const ASPECTS = [
+  "Original",
+  "Free",
+  "3:2",
+  "2:3",
+  "4:3",
+  "3:4",
+  "1:1",
+  "4:5",
+  "5:4",
+  "16:9",
+  "9:16",
+] as const;
+type Aspect = (typeof ASPECTS)[number];
+
+function swapAspect(aspect: Aspect): Aspect {
+  if (aspect === "Original" || aspect === "Free" || aspect === "1:1") {
+    return aspect;
+  }
+  const [wide, tall] = aspect.split(":");
+  return `${tall}:${wide}` as Aspect;
+}
+
+function orientedPhoto(turns: number) {
+  const swapped = turns % 2 === 1;
+  const w = swapped ? PHOTO.h : PHOTO.w;
+  const h = swapped ? PHOTO.w : PHOTO.h;
+  const cx = PHOTO.x + PHOTO.w / 2;
+  const cy = PHOTO.y + PHOTO.h / 2;
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
+
+function frameFor(
+  aspect: Aspect,
+  degrees: number,
+  photo: { x: number; y: number; w: number; h: number },
+) {
+  const angle = (Math.abs(degrees) * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const halfW = photo.w / 2;
+  const halfH = photo.h / 2;
+  let width: number;
+  let height: number;
+  if (aspect === "Free") {
+    if (angle < 1e-6) {
+      width = photo.w;
+      height = photo.h;
+    } else {
+      const sideLong = Math.max(photo.w, photo.h);
+      const sideShort = Math.min(photo.w, photo.h);
+      if (sideShort <= 2 * sin * cos * sideLong) {
+        const x = 0.5 * sideShort;
+        if (photo.w >= photo.h) {
+          width = x / sin;
+          height = x / cos;
+        } else {
+          width = x / cos;
+          height = x / sin;
+        }
+      } else {
+        const cos2 = cos * cos - sin * sin;
+        width = (photo.w * cos - photo.h * sin) / cos2;
+        height = (photo.h * cos - photo.w * sin) / cos2;
+      }
+    }
+  } else {
+    const ratio =
+      aspect === "Original"
+        ? photo.w / photo.h
+        : Number(aspect.split(":")[0]) / Number(aspect.split(":")[1]);
+    const halfHeight = Math.min(
+      halfW / (ratio * cos + sin),
+      halfH / (ratio * sin + cos),
+    );
+    height = halfHeight * 2;
+    width = ratio * height;
+  }
+  return {
+    x: photo.x + (photo.w - width) / 2,
+    y: photo.y + (photo.h - height) / 2,
+    w: width,
+    h: height,
+  };
+}
 
 type PointEvent = {
   clientX: number;
@@ -41,6 +125,8 @@ type Sliders = {
   highlight: number;
   brightness: number;
   contrast: number;
+  temperature: number;
+  tint: number;
   vibrance: number;
   saturation: number;
   clarity: number;
@@ -54,6 +140,8 @@ const INITIAL: Sliders = {
   highlight: -15,
   brightness: 0,
   contrast: 10,
+  temperature: 8,
+  tint: -4,
   vibrance: 12,
   saturation: 0,
   clarity: 5,
@@ -71,18 +159,26 @@ export default function EditModeWireframe() {
   const [hasSave, setHasSave] = useState(true);
   const [rotation, setRotation] = useState(-2.4);
   const [savedRotation, setSavedRotation] = useState(-2.4);
+  const [aspect, setAspect] = useState<Aspect>("Original");
+  const [savedAspect, setSavedAspect] = useState<Aspect>("Original");
+  const [turns, setTurns] = useState(0);
+  const [savedTurns, setSavedTurns] = useState(0);
   const [sliders, setSliders] = useState<Sliders>(INITIAL);
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
 
-  const usesCurrentGeometry = view !== "original" && view !== "stored";
-  const frame = usesCurrentGeometry ? CROP : PHOTO;
+  const shownAspect = view === "stored" ? savedAspect : aspect;
   const shownRotation =
     view === "original" ? 0 : view === "stored" ? savedRotation : rotation;
+  const shownTurns = view === "original" ? 0 : view === "stored" ? savedTurns : turns;
+  const photo = view === "original" ? PHOTO : orientedPhoto(shownTurns);
+  const frame =
+    view === "original" ? PHOTO : frameFor(shownAspect, shownRotation, photo);
+  const showCrop = view !== "original";
   const photoCenter = {
     x: PHOTO.x + PHOTO.w / 2,
     y: PHOTO.y + PHOTO.h / 2,
   };
-  const photoTransform = `rotate(${-shownRotation} ${photoCenter.x} ${photoCenter.y})`;
+  const photoTransform = `rotate(${90 * shownTurns - shownRotation} ${photoCenter.x} ${photoCenter.y})`;
 
   function toViewBox(clientX: number, clientY: number) {
     const svg = svgRef.current;
@@ -214,7 +310,7 @@ export default function EditModeWireframe() {
                 />
               </g>
 
-              {usesCurrentGeometry && (
+              {showCrop && (
                 <g transform={photoTransform} mask="url(#frame-hole)">
                   <rect
                     x={PHOTO.x}
@@ -299,7 +395,7 @@ export default function EditModeWireframe() {
                 strokeWidth={1}
               />
 
-              {usesCurrentGeometry &&
+              {showCrop &&
                 [
                   [frame.x, frame.y],
                   [frame.x + frame.w / 2, frame.y],
@@ -405,7 +501,16 @@ export default function EditModeWireframe() {
               <Row gap={6} wrap>
                 <Button variant="secondary">Mirror H</Button>
                 <Button variant="secondary">Mirror V</Button>
-                <Button variant="secondary">90°</Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setTurns((current) => (current + 1) % 4);
+                    setAspect((current) => swapAspect(current));
+                    editCurrent();
+                  }}
+                >
+                  90°
+                </Button>
               </Row>
             </Stack>
 
@@ -469,6 +574,22 @@ export default function EditModeWireframe() {
                 Color
               </Text>
               <Slider
+                label="Temperature"
+                value={sliders.temperature}
+                min={-100}
+                max={100}
+                step={1}
+                onChange={(value) => setSlider("temperature", value)}
+              />
+              <Slider
+                label="Tint"
+                value={sliders.tint}
+                min={-100}
+                max={100}
+                step={1}
+                onChange={(value) => setSlider("tint", value)}
+              />
+              <Slider
                 label="Vibrance"
                 value={sliders.vibrance}
                 min={-100}
@@ -504,6 +625,16 @@ export default function EditModeWireframe() {
               <Text size="small" weight="semibold">
                 Frame
               </Text>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  const index = ASPECTS.indexOf(aspect);
+                  setAspect(ASPECTS[(index + 1) % ASPECTS.length]);
+                  editCurrent();
+                }}
+              >
+                {aspect}
+              </Button>
               <Slider
                 label="Rotation"
                 value={rotation}
@@ -559,6 +690,8 @@ export default function EditModeWireframe() {
                 onClick={() => {
                   setHasSave(true);
                   setSavedRotation(rotation);
+                  setSavedAspect(aspect);
+                  setSavedTurns(turns);
                 }}
               >
                 Save
