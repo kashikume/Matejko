@@ -20,6 +20,9 @@ pub struct Rendered {
     /// The usable rectangle as fractions of the picture: left, top, width,
     /// height. The frame is stored as fractions of this rectangle.
     pub usable: [f32; 4],
+    /// The photo's centre as fractions of the picture. The view keeps it in
+    /// place when the box around the corrected photo changes.
+    pub origin: [f32; 2],
     /// The photo's long side in pixels of `rgba`. Holding the on-screen size
     /// of this steady keeps the zoom when the preview, the full-size picture,
     /// or a larger rotated box replace each other.
@@ -187,7 +190,8 @@ fn render_picture(
     } else {
         (source.width, source.height)
     };
-    let usable = usable_fraction(photo_w, photo_h, render.adjustments.rotation);
+    let warp = render.adjustments.warp(photo_w as f32, photo_h as f32);
+    let usable = usable_fraction(&warp);
     let histogram = histogram_of(&image, usable, render.adjustments.frame);
     let image_width = image.width;
     let display = if image.width > max_edge || image.height > max_edge {
@@ -203,6 +207,7 @@ fn render_picture(
         rgba: display.to_rgba8(true),
         histogram,
         usable,
+        origin: warp.origin_fraction(),
         photo_long: photo_w.max(photo_h) as f32 * display.width as f32 / image_width as f32,
     }
 }

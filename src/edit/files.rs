@@ -85,6 +85,11 @@ struct AdjBody {
     saturation: i32,
     clarity: i32,
     rotation: f32,
+    /// Keystone. Older files have none: 0.
+    #[serde(default)]
+    vertical: i32,
+    #[serde(default)]
+    horizontal: i32,
     aspect: String,
     frame: FrameBody,
     jpeg_quality: u8,
@@ -124,6 +129,8 @@ impl AdjFile {
                 saturation: self.adjustments.saturation.round() as i32,
                 clarity: self.adjustments.clarity.round() as i32,
                 rotation: self.adjustments.rotation,
+                vertical: self.adjustments.vertical.round() as i32,
+                horizontal: self.adjustments.horizontal.round() as i32,
                 aspect: self.adjustments.aspect.label().into(),
                 frame: FrameBody {
                     x: self.adjustments.frame.x,
@@ -162,6 +169,8 @@ impl AdjFile {
                 saturation: raw.adjustments.saturation as f32,
                 clarity: raw.adjustments.clarity as f32,
                 rotation: raw.adjustments.rotation,
+                vertical: raw.adjustments.vertical as f32,
+                horizontal: raw.adjustments.horizontal as f32,
                 aspect,
                 frame: Frame {
                     x: raw.adjustments.frame.x,
@@ -771,6 +780,26 @@ mod tests {
         .unwrap();
         assert_eq!(third.original, "photo.jpg");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_adj_from_before_keystone_still_opens() {
+        let mut adj = AdjFile {
+            original: "a.jpg".into(),
+            adjustments: Adjustments::defaults(90),
+        };
+        adj.adjustments.vertical = 12.0;
+        adj.adjustments.horizontal = -7.0;
+        let back = AdjFile::parse(&adj.to_json()).unwrap();
+        assert_eq!((back.adjustments.vertical, back.adjustments.horizontal), (12.0, -7.0));
+        let old = adj
+            .to_json()
+            .lines()
+            .filter(|line| !line.contains("\"vertical\"") && !line.contains("\"horizontal\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let back = AdjFile::parse(&old).unwrap();
+        assert_eq!((back.adjustments.vertical, back.adjustments.horizontal), (0.0, 0.0));
     }
 
     #[test]

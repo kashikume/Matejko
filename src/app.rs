@@ -23,7 +23,7 @@ use crate::decode::{DecodedImage, Decoder, UserEvent};
 use crate::edit::{
     clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, Align, EditWorker,
     Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
-    Rendered, SaveTarget, Saved, Slider, Tone, WorkerEvent,
+    Rendered, SaveTarget, Saved, Slider, Tone, Warp, WorkerEvent,
 };
 use crate::gpu::{Label, LabelAlign};
 use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
@@ -248,6 +248,8 @@ struct Editing {
     usable: [f32; 4],
     /// `Rendered::photo_long` of the picture on screen, or 0 before the first.
     photo_long: f32,
+    /// `Rendered::origin` of the picture on screen.
+    origin: [f32; 2],
     current: Adjustments,
     saved: Adjustments,
     guide: Guide,
@@ -267,6 +269,8 @@ struct Editing {
     wheel_rest: Option<(Slider, f32)>,
     /// When to run the full-size render after wheel steps.
     wheel_settle: Option<Instant>,
+    /// How far the panel is scrolled. `layout` clamps it to the content.
+    scroll: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +289,11 @@ enum EditPointer {
         grab_y: f32,
     },
     Compare,
+    /// The panel's scrollbar thumb, grabbed at `start_y`.
+    Scroll {
+        start_y: f32,
+        start_scroll: f32,
+    },
 }
 
 pub struct App {
@@ -837,6 +846,7 @@ impl App {
             fit_pending: true,
             usable: [0.0, 0.0, 1.0, 1.0],
             photo_long: 0.0,
+            origin: [0.5, 0.5],
             current,
             saved,
             guide: Guide::None,
@@ -853,6 +863,7 @@ impl App {
             last_slider_press: None,
             wheel_rest: None,
             wheel_settle: None,
+            scroll: 0.0,
         });
         self.prompt = None;
         self.request_edit_render();
@@ -890,6 +901,7 @@ impl App {
         editing.histogram = rendered.histogram;
         editing.usable = rendered.usable;
         let old_photo_long = std::mem::replace(&mut editing.photo_long, rendered.photo_long);
+        let old_origin = std::mem::replace(&mut editing.origin, rendered.origin);
         let fit = std::mem::take(&mut editing.fit_pending);
         let decoded = DecodedImage {
             width: rendered.width,
@@ -902,14 +914,14 @@ impl App {
         } else if let Some(old) = self.shown_size {
             // Keep the photo where it was on screen: same size, same centre.
             // The picture's resolution changes between the preview and the
-            // full size, and its box grows with the rotation.
+            // full size, and its box changes with rotation and keystone.
             if old_photo_long > 0.0 {
-                let centre_x = self.view.pan.x + old.x * 0.5 * self.view.scale;
-                let centre_y = self.view.pan.y + old.y * 0.5 * self.view.scale;
+                let centre_x = self.view.pan.x + old.x * old_origin[0] * self.view.scale;
+                let centre_y = self.view.pan.y + old.y * old_origin[1] * self.view.scale;
                 self.view.scale *= old_photo_long / rendered.photo_long.max(1.0);
                 self.view.pan = Vec2::new(
-                    centre_x - new_size.x * 0.5 * self.view.scale,
-                    centre_y - new_size.y * 0.5 * self.view.scale,
+                    centre_x - new_size.x * rendered.origin[0] * self.view.scale,
+                    centre_y - new_size.y * rendered.origin[1] * self.view.scale,
                 );
             }
         }
@@ -970,6 +982,7 @@ impl App {
             editing.confirm_exit,
             editing.copy_name.as_deref(),
             editing.notice.as_deref(),
+            editing.scroll,
         ))
     }
 
@@ -1078,6 +1091,13 @@ impl App {
                 quad(x0 - 6.0 * s, y0, x1 + 4.0 * s, y1, [1.0, 1.0, 1.0, 0.09]);
             }
         }
+        if let Some((track, thumb)) = panel.scrollbar {
+            let hot = self.hover == Some(EditHit::Scrollbar)
+                || matches!(editing.pointer, Some(EditPointer::Scroll { .. }));
+            quad(track[0], track[1], track[2], track[3], [1.0, 1.0, 1.0, 0.05]);
+            let alpha = if hot { 0.6 } else { 0.3 };
+            quad(thumb[0], thumb[1], thumb[2], thumb[3], [1.0, 1.0, 1.0, alpha]);
+        }
         for track in &panel.tracks {
             let slider = track.slider;
             let y = track.y;
@@ -1129,7 +1149,10 @@ impl App {
         }
         // A button under the pointer brightens. Its row is the button's
         // rectangle without the inset its background has.
-        if let Some(hit) = self.hover.filter(|hit| !matches!(hit, EditHit::Slider(_))) {
+        if let Some(hit) = self
+            .hover
+            .filter(|hit| !matches!(hit, EditHit::Slider(_) | EditHit::Scrollbar))
+        {
             if let Some([x0, y0, x1, y1]) = panel.row_rect(hit) {
                 let inset = 2.0 * s;
                 quad(x0, y0 + inset, x1, y1 - inset, [1.0, 1.0, 1.0, 0.12]);
@@ -1150,26 +1173,20 @@ impl App {
             EditHit::Divider => editing.pointer = Some(EditPointer::Divider),
             EditHit::Guide => editing.guide = editing.guide.next(),
             EditHit::MirrorH => {
-                editing.current.mirror_horizontal = !editing.current.mirror_horizontal;
+                editing.current.mirror_horizontally();
+                refit_frame(editing);
                 rerun = true;
             }
             EditHit::MirrorV => {
-                editing.current.mirror_vertical = !editing.current.mirror_vertical;
+                editing.current.mirror_vertically();
+                refit_frame(editing);
                 rerun = true;
             }
             EditHit::Turn => {
                 editing.current.turn_clockwise(0.0, 0.0);
                 // The usable rectangle turned with the photo. A locked ratio
                 // is refitted in pixels of the new one.
-                let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
-                let current = &editing.current;
-                editing.current.frame = clamp_frame_to_photo(
-                    current.frame,
-                    current.aspect,
-                    current.rotation,
-                    width,
-                    height,
-                );
+                refit_frame(editing);
                 rerun = true;
             }
             EditHit::Aspect => {
@@ -1249,6 +1266,14 @@ impl App {
                 return;
             }
             EditHit::ConfirmNo => editing.confirm_exit = false,
+            EditHit::Scrollbar => {
+                if let Some(panel) = &panel {
+                    editing.pointer = Some(EditPointer::Scroll {
+                        start_y: cursor.y,
+                        start_scroll: panel.scroll,
+                    });
+                }
+            }
         }
         if matches!(hit, EditHit::Save) {
             self.save_edit(false);
@@ -1308,21 +1333,25 @@ impl App {
                 let dx = (cursor.x - grab_x) / (usable[2] - usable[0]).max(1.0);
                 let dy = (cursor.y - grab_y) / (usable[3] - usable[1]).max(1.0);
                 if let Some(editing) = &mut self.editing {
-                    let (photo_w, photo_h) =
-                        oriented_extent(&editing.loaded.baseline, &editing.current);
-                    editing.current.frame = drag_frame(
-                        start,
-                        handle,
-                        dx,
-                        dy,
-                        editing.current.aspect,
-                        editing.current.rotation,
-                        photo_w,
-                        photo_h,
-                    );
+                    let warp = current_warp(editing);
+                    editing.current.frame =
+                        drag_frame(start, handle, dx, dy, editing.current.aspect, &warp);
                 }
                 // The frame is drawn over the picture. The histogram catches
                 // up on release.
+                self.request_redraw();
+            }
+            Some(EditPointer::Scroll {
+                start_y,
+                start_scroll,
+            }) => {
+                let Some(panel) = self.edit_panel() else {
+                    return;
+                };
+                let scroll = panel.scroll_for_drag(start_scroll, cursor.y - start_y);
+                if let Some(editing) = &mut self.editing {
+                    editing.scroll = scroll;
+                }
                 self.request_redraw();
             }
             Some(EditPointer::Compare) | None => {}
@@ -2081,11 +2110,20 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 };
                 if let Some(panel) = self.edit_panel() {
-                    // Over the panel the wheel steps the highlighted slider
-                    // and never zooms the picture.
+                    // Over the panel the wheel steps the highlighted slider,
+                    // or else scrolls the panel. It never zooms the picture.
                     if self.cursor.x >= panel.x - 6.0 * panel.scale {
                         if let Some(EditHit::Slider(slider)) = self.hover {
                             self.wheel_slider(slider, steps);
+                        } else if panel.max_scroll > 0.0 {
+                            let scroll = (panel.scroll - steps * 48.0 * panel.scale)
+                                .clamp(0.0, panel.max_scroll);
+                            if let Some(editing) = &mut self.editing {
+                                editing.scroll = scroll;
+                            }
+                            // The rows moved under the pointer.
+                            self.update_edit_cursor();
+                            self.request_redraw();
                         }
                         return;
                     }
@@ -2296,12 +2334,22 @@ fn oriented_extent(image: &LinearImage, adjustments: &Adjustments) -> (f32, f32)
 /// Sets a slider. Rotation also pulls the frame back inside the rotated photo.
 fn apply_slider(editing: &mut Editing, slider: Slider, value: f32) {
     slider.set(&mut editing.current, value);
-    if slider == Slider::Rotation {
-        let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
-        let current = &editing.current;
-        editing.current.frame =
-            clamp_frame_to_photo(current.frame, current.aspect, current.rotation, width, height);
+    if matches!(slider, Slider::Rotation | Slider::Vertical | Slider::Horizontal) {
+        refit_frame(editing);
     }
+}
+
+/// Rotation and keystone for the current controls, at full resolution.
+fn current_warp(editing: &Editing) -> Warp {
+    let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
+    editing.current.warp(width, height)
+}
+
+/// Puts the frame back on the corrected photo after its geometry changed.
+fn refit_frame(editing: &mut Editing) {
+    let warp = current_warp(editing);
+    let current = &editing.current;
+    editing.current.frame = clamp_frame_to_photo(current.frame, current.aspect, &warp);
 }
 
 fn is_jpeg(path: &Path) -> bool {

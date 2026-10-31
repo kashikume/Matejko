@@ -18,6 +18,8 @@ pub enum Slider {
     Saturation,
     Clarity,
     Rotation,
+    Vertical,
+    Horizontal,
     Quality,
 }
 
@@ -45,6 +47,8 @@ impl Slider {
             Slider::Saturation => adj.saturation,
             Slider::Clarity => adj.clarity,
             Slider::Rotation => adj.rotation,
+            Slider::Vertical => adj.vertical,
+            Slider::Horizontal => adj.horizontal,
             Slider::Quality => adj.jpeg_quality as f32,
         }
     }
@@ -65,6 +69,8 @@ impl Slider {
             Slider::Saturation => adj.saturation = value,
             Slider::Clarity => adj.clarity = value,
             Slider::Rotation => adj.rotation = value,
+            Slider::Vertical => adj.vertical = value,
+            Slider::Horizontal => adj.horizontal = value,
             Slider::Quality => adj.jpeg_quality = value.round().clamp(1.0, 100.0) as u8,
         }
     }
@@ -106,6 +112,8 @@ impl Slider {
             Slider::Saturation => "Saturation",
             Slider::Clarity => "Clarity",
             Slider::Rotation => "Rotation",
+            Slider::Vertical => "Vertical",
+            Slider::Horizontal => "Horizontal",
             Slider::Quality => "JPEG quality",
         }
     }
@@ -126,6 +134,8 @@ pub enum Hit {
     Exit,
     ConfirmYes,
     ConfirmNo,
+    /// The scrollbar on the panel's right edge, shown when it runs long.
+    Scrollbar,
 }
 
 /// The drawn part of a slider row, right of its label.
@@ -216,9 +226,49 @@ pub struct Panel {
     pub compare: Vec<CompareButton>,
     pub texts: Vec<Text>,
     pub histogram: [f32; 4],
+    /// How far the content is scrolled up, already clamped.
+    pub scroll: f32,
+    /// The furthest the content can scroll. 0 when it fits the window.
+    pub max_scroll: f32,
+    /// The scrollbar's track and thumb, when the content does not fit:
+    /// x0, y0, x1, y1.
+    pub scrollbar: Option<([f32; 4], [f32; 4])>,
 }
 
 impl Panel {
+    fn shift_up(&mut self, by: f32) {
+        for row in &mut self.rows {
+            row.3 -= by;
+            row.4 -= by;
+        }
+        for track in &mut self.tracks {
+            track.y -= by;
+        }
+        for button in &mut self.buttons {
+            button.rect[1] -= by;
+            button.rect[3] -= by;
+        }
+        for button in &mut self.compare {
+            button.rect[1] -= by;
+            button.rect[3] -= by;
+        }
+        for text in &mut self.texts {
+            text.top -= by;
+        }
+        self.histogram[1] -= by;
+        self.histogram[3] -= by;
+    }
+
+    /// The scroll position that puts the scrollbar's thumb under a pointer
+    /// moved by `dy` since the drag began at `start`.
+    pub fn scroll_for_drag(&self, start: f32, dy: f32) -> f32 {
+        let Some((track, thumb)) = self.scrollbar else {
+            return 0.0;
+        };
+        let room = (track[3] - track[1]) - (thumb[3] - thumb[1]);
+        (start + dy * self.max_scroll / room.max(1.0)).clamp(0.0, self.max_scroll)
+    }
+
     /// The pointer is on the divider between the picture and the panel.
     pub fn on_divider(&self, cursor_x: f32) -> bool {
         (cursor_x - self.x).abs() <= 6.0 * self.scale
@@ -339,6 +389,7 @@ pub fn layout(
     confirm_exit: bool,
     copy_name: Option<&str>,
     message: Option<&str>,
+    scroll: f32,
 ) -> Panel {
     let scale = scale.max(1.0);
     let x = window_w * (1.0 - split.clamp(0.18, 0.5));
@@ -393,6 +444,8 @@ pub fn layout(
     b.heading("Frame");
     b.button(Hit::Aspect, format!("Aspect  {}", adj.aspect.label()));
     b.slider(Slider::Rotation, adj);
+    b.slider(Slider::Vertical, adj);
+    b.slider(Slider::Horizontal, adj);
     b.heading("Output");
     b.slider(Slider::Quality, adj);
     b.y += 10.0 * scale;
@@ -428,12 +481,16 @@ pub fn layout(
     }
     b.y += b.row_h + 6.0 * scale;
     if confirm_exit {
-        b.button(Hit::ConfirmYes, "Discard changes".into());
-        b.button(Hit::ConfirmNo, "Keep editing".into());
+        b.button_row(&[
+            (Hit::ConfirmYes, "Discard changes", false),
+            (Hit::ConfirmNo, "Keep editing", false),
+        ]);
     } else {
-        b.button(Hit::Save, "Save".into());
-        b.button(Hit::SaveCopy, "Save as copy".into());
-        b.button(Hit::Exit, "Exit".into());
+        b.button_row(&[
+            (Hit::Save, "Save", false),
+            (Hit::SaveCopy, "Save as copy", false),
+            (Hit::Exit, "Exit", false),
+        ]);
     }
     b.y += 4.0 * scale;
     for line in copy_name
@@ -444,8 +501,11 @@ pub fn layout(
         b.text(line, x0, x1, Align::Left, Tone::Notice, None);
         b.y += b.row_h;
     }
-    let _ = window_h;
-    Panel {
+    // Taller than the window: the whole column scrolls, histogram and all.
+    let content_h = b.y + 10.0 * scale;
+    let max_scroll = (content_h - window_h).max(0.0);
+    let scroll = scroll.clamp(0.0, max_scroll);
+    let mut panel = Panel {
         x,
         scale,
         rows: b.rows,
@@ -454,7 +514,22 @@ pub fn layout(
         compare,
         texts: b.texts,
         histogram,
+        scroll,
+        max_scroll,
+        scrollbar: None,
+    };
+    if scroll > 0.0 {
+        panel.shift_up(scroll);
     }
+    if max_scroll > 0.0 {
+        let track = [window_w - 8.0 * scale, 0.0, window_w - 3.0 * scale, window_h];
+        let thumb_h = (window_h * window_h / content_h).max(24.0 * scale);
+        let thumb_y = (window_h - thumb_h) * scroll / max_scroll;
+        let thumb = [track[0], thumb_y, track[2], thumb_y + thumb_h];
+        panel.rows.push((Hit::Scrollbar, track[0] - 2.0 * scale, window_w, 0.0, window_h));
+        panel.scrollbar = Some((track, thumb));
+    }
+    panel
 }
 
 fn slider_value(slider: Slider, adj: &Adjustments) -> String {
@@ -481,6 +556,11 @@ pub fn hit_test(panel: &Panel, cursor_x: f32, cursor_y: f32) -> Option<Hit> {
     if cursor_x < panel.x {
         return None;
     }
+    if let Some((track, _)) = panel.scrollbar {
+        if cursor_x >= track[0] - 2.0 * panel.scale {
+            return Some(Hit::Scrollbar);
+        }
+    }
     for (hit, x0, x1, y0, y1) in &panel.rows {
         if cursor_x >= *x0 && cursor_x < *x1 && cursor_y >= *y0 && cursor_y < *y1 {
             return Some(*hit);
@@ -498,21 +578,21 @@ mod tests {
     fn tracks_sit_right_of_the_labels_and_map_both_ways() {
         let adj = Adjustments::defaults(90);
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
         );
         let track = panel.track(Slider::Contrast).unwrap();
         assert!(track.x0 > panel.x + 100.0 && track.x1 < 1600.0);
         let mid = track.x_of(0.0);
         assert!((track.value_at(mid)).abs() < 1.0e-3);
         assert!((track.delta(track.x1 - track.x0) - 200.0).abs() < 1.0e-3);
-        assert_eq!(panel.tracks.len(), 13);
+        assert_eq!(panel.tracks.len(), 15);
     }
 
     #[test]
     fn rows_have_a_margin_and_groups_have_room_above_their_titles() {
         let adj = Adjustments::defaults(90);
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
         );
         // Every control starts clear of the divider.
         for (_, x0, ..) in &panel.rows {
@@ -539,7 +619,7 @@ mod tests {
         let mut adj = Adjustments::defaults(90);
         adj.mirror_vertical = true;
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
         );
         let h = panel.row_rect(Hit::MirrorH).unwrap();
         let v = panel.row_rect(Hit::MirrorV).unwrap();
@@ -559,10 +639,55 @@ mod tests {
     }
 
     #[test]
+    fn a_short_window_scrolls_the_panel() {
+        let adj = Adjustments::defaults(90);
+        let at = |scroll| {
+            layout(1600.0, 400.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, scroll)
+        };
+        let top = at(0.0);
+        assert!(top.max_scroll > 0.0 && top.scrollbar.is_some());
+        // Scrolled to the end, the Exit button is inside the window.
+        let end = at(1.0e6);
+        assert_eq!(end.scroll, end.max_scroll);
+        let exit = end.row_rect(Hit::Exit).unwrap();
+        assert!(exit[3] <= 400.0 && exit[1] >= 0.0, "{exit:?}");
+        // Everything moved up together.
+        let dy = top.row_rect(Hit::Exit).unwrap()[1] - exit[1];
+        assert!((dy - end.max_scroll).abs() < 1.0e-3);
+        assert!((top.histogram[1] - end.histogram[1] - dy).abs() < 1.0e-3);
+        // The scrollbar wins over the row under it.
+        let (track, _) = end.scrollbar.unwrap();
+        assert_eq!(hit_test(&end, track[0] + 1.0, exit[1] + 2.0), Some(Hit::Scrollbar));
+        // A tall window does not scroll.
+        let tall = layout(1600.0, 2000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 50.0);
+        assert_eq!((tall.scroll, tall.max_scroll), (0.0, 0.0));
+        assert!(tall.scrollbar.is_none());
+    }
+
+    #[test]
+    fn save_save_as_copy_and_exit_share_one_row() {
+        let adj = Adjustments::defaults(90);
+        let panel = layout(
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
+        );
+        let save = panel.row_rect(Hit::Save).unwrap();
+        let copy = panel.row_rect(Hit::SaveCopy).unwrap();
+        let exit = panel.row_rect(Hit::Exit).unwrap();
+        assert!(save[1] == copy[1] && copy[1] == exit[1], "not one row");
+        assert!(save[2] < copy[0] && copy[2] < exit[0], "buttons overlap");
+        let confirm = layout(
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, true, None, None, 0.0,
+        );
+        let yes = confirm.row_rect(Hit::ConfirmYes).unwrap();
+        let no = confirm.row_rect(Hit::ConfirmNo).unwrap();
+        assert!(yes[1] == no[1] && yes[2] < no[0]);
+    }
+
+    #[test]
     fn s_and_sf_wait_for_a_save() {
         let adj = Adjustments::defaults(90);
         let compare_hits = |has_save| {
-            layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, has_save, None, false, None, None)
+            layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, has_save, None, false, None, None, 0.0)
                 .rows
                 .iter()
                 .filter(|row| matches!(row.0, Hit::Compare(_)))

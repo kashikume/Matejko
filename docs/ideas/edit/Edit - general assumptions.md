@@ -82,13 +82,15 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "saturation": 0,
     "clarity": 0,
     "rotation": 0.0,
+    "vertical": 0,
+    "horizontal": 0,
     "frame": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
     "jpeg_quality": 90
   }
 }
 ```
 
-`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (−100…+100 for temperature and tint, stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
+`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (−100…+100 for temperature and tint, stops for exposure, degrees for rotation, −100…+100 for vertical and horizontal, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
 
 One value per control, in the pipeline order below. The stack is that pipeline, run from the baseline. It is not a list the user reorders, and it is not one entry per slider twitch. JPEG quality is stored with them and is not a stage in that stack.
 
@@ -175,7 +177,7 @@ Each preview and each render is one run. A control at its default is skipped. Th
 | 8 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
 | 9 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
 | 10 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
-| 11–12 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
+| 11–12 | Perspective and horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - perspective.md`, `Edit - frame and horizon.md` |
 
 ### Orient
 
@@ -207,7 +209,7 @@ The output sample is the baseline sample at `(sx, sy)`. There is no kernel. All 
 
 ### Horizon and frame
 
-Horizon and frame share one resample, after clarity. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. An output point that falls outside the oriented image is 0. A kernel tap past the edge repeats the edge pixel. θ = 0 and a full frame skip the resample: work is already the output. The horizon angle is not a place to turn the picture by 90°.
+Perspective, horizon, and frame share one resample, after clarity. The keystone comes first, then the turn, then the cut. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. An output point that falls outside the oriented image is 0. A kernel tap past the edge repeats the edge pixel. θ = 0, both keystone sliders at 0, and a full frame skip the resample: work is already the output. An adjustment file without `vertical` or `horizontal` reads them as 0. The horizon angle is not a place to turn the picture by 90°.
 
 ### Preview
 

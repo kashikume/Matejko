@@ -130,6 +130,9 @@ pub struct Adjustments {
     pub saturation: f32,
     pub clarity: f32,
     pub rotation: f32,
+    /// Keystone, −100…+100. See `Warp::new`.
+    pub vertical: f32,
+    pub horizontal: f32,
     pub aspect: Aspect,
     pub frame: Frame,
     pub jpeg_quality: u8,
@@ -153,6 +156,8 @@ impl Adjustments {
             saturation: 0.0,
             clarity: 0.0,
             rotation: 0.0,
+            vertical: 0.0,
+            horizontal: 0.0,
             aspect: Aspect::Original,
             frame: Frame::default(),
             jpeg_quality,
@@ -178,6 +183,8 @@ impl Adjustments {
             && !self.mirror_horizontal
             && !self.mirror_vertical
             && self.rotation == 0.0
+            && self.vertical == 0.0
+            && self.horizontal == 0.0
             && self.aspect == Aspect::Original
             && self.frame == Frame::default()
     }
@@ -188,9 +195,34 @@ impl Adjustments {
             && self.jpeg_quality == estimated_quality
     }
 
+    /// The geometry for a photo of this size in the chosen orientation.
+    pub fn warp(&self, oriented_w: f32, oriented_h: f32) -> Warp {
+        Warp::new(self.rotation, self.vertical, self.horizontal, oriented_w, oriented_h)
+    }
+
+    /// Mirrors the result as it is on screen: the turn and the left-right
+    /// keystone change sign, and the frame flips with the picture.
+    pub fn mirror_horizontally(&mut self) {
+        self.mirror_horizontal = !self.mirror_horizontal;
+        self.rotation = -self.rotation;
+        self.horizontal = -self.horizontal;
+        self.frame.x = 1.0 - self.frame.x - self.frame.w;
+    }
+
+    pub fn mirror_vertically(&mut self) {
+        self.mirror_vertical = !self.mirror_vertical;
+        self.rotation = -self.rotation;
+        self.vertical = -self.vertical;
+        self.frame.y = 1.0 - self.frame.y - self.frame.h;
+    }
+
     pub fn turn_clockwise(&mut self, photo_w: f32, photo_h: f32) {
         self.quarter_turns = (self.quarter_turns + 1) % 4;
         self.aspect = self.aspect.turned_clockwise();
+        // The old top is now on the right, and the old right at the bottom.
+        let (vertical, horizontal) = (self.vertical, self.horizontal);
+        self.vertical = -horizontal;
+        self.horizontal = vertical;
         let frame = self.frame;
         self.frame = Frame {
             x: 1.0 - frame.y - frame.h,
@@ -203,7 +235,7 @@ impl Adjustments {
 
     pub fn cycle_aspect(&mut self, oriented_w: f32, oriented_h: f32) {
         self.aspect = self.aspect.next();
-        self.frame = fit_aspect(self.aspect, self.rotation, oriented_w, oriented_h);
+        self.frame = fit_aspect(self.aspect, &self.warp(oriented_w, oriented_h));
     }
 }
 
@@ -317,12 +349,13 @@ pub fn run(baseline: &Image, adj: &Adjustments, options: &RunOptions) -> Image {
         }
         decode_inplace(&mut image);
     }
+    let warp = adj.warp(image.width as f32, image.height as f32);
     if options.crop {
-        if adj.rotation != 0.0 || adj.frame != Frame::default() {
-            image = crop_frame(&image, adj.rotation, adj.frame);
+        if !warp.is_identity() || adj.frame != Frame::default() {
+            image = crop_frame(&image, &warp, adj.frame);
         }
-    } else if adj.rotation != 0.0 {
-        image = rotate_canvas(&image, adj.rotation);
+    } else if !warp.is_identity() {
+        image = warp_canvas(&image, &warp);
     }
     let _ = options.dither;
     image
@@ -1105,14 +1138,282 @@ fn upsample_sized(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -
     out
 }
 
-/// The kept rectangle in pixels of the rotated canvas, which has the size of
-/// the oriented image: left, top, width, height.
-fn frame_pixels(width: f32, height: f32, theta: f32, frame: Frame) -> (f32, f32, f32, f32) {
-    // The frame may reach past the usable rectangle where the turned photo
-    // does. Drags and rotation changes keep its corners on the photo.
-    let (ux, uy, uw, uh) = usable_rect(width, height, theta);
-    let (x, y, w, h) = if theta.abs() < 1.0e-6 {
-        // Upright, the photo is the usable rectangle.
+/// A 3×3 projective map, row-major, acting on `(x, y, 1)`.
+type Homography = [f64; 9];
+
+/// Full keystone at ±100: one edge 50% longer, the opposite 50% shorter.
+const KEYSTONE: f32 = 0.5;
+
+/// The geometry after the tone stages: perspective, then the horizon turn.
+/// Offsets are from the photo's centre, in pixels of the oriented photo,
+/// y down. The photo's centre stays where it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Warp {
+    pub width: f32,
+    pub height: f32,
+    theta: f32,
+    cos: f32,
+    sin: f32,
+    /// Photo to corrected, and back. `None` when both sliders are 0.
+    perspective: Option<(Homography, Homography)>,
+}
+
+impl Warp {
+    /// `vertical` and `horizontal` are the sliders, −100…+100. Positive
+    /// vertical widens the top, which straightens verticals that lean in
+    /// toward the top. Positive horizontal makes the right side taller.
+    pub fn new(rotation_deg: f32, vertical: f32, horizontal: f32, width: f32, height: f32) -> Self {
+        let theta = rotation_deg.to_radians();
+        let perspective = (vertical != 0.0 || horizontal != 0.0).then(|| {
+            let forward = keystone(vertical, horizontal, width, height);
+            (forward, invert(&forward))
+        });
+        Self {
+            width,
+            height,
+            theta,
+            cos: theta.cos(),
+            sin: theta.sin(),
+            perspective,
+        }
+    }
+
+    /// A turn alone, with no perspective.
+    #[cfg(test)]
+    pub fn turn(rotation_deg: f32, width: f32, height: f32) -> Self {
+        Self::new(rotation_deg, 0.0, 0.0, width, height)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.theta.abs() < 1.0e-6 && self.perspective.is_none()
+    }
+
+    /// Where the photo point shown at an output offset came from.
+    fn source(&self, dx: f32, dy: f32) -> (f32, f32) {
+        // Undo the counterclockwise turn by turning clockwise.
+        let x = self.cos * dx - self.sin * dy;
+        let y = self.sin * dx + self.cos * dy;
+        match &self.perspective {
+            Some((_, back)) => apply(back, x, y),
+            None => (x, y),
+        }
+    }
+
+    /// Where a photo point is shown.
+    fn forward(&self, sx: f32, sy: f32) -> (f32, f32) {
+        let (x, y) = match &self.perspective {
+            Some((there, _)) => apply(there, sx, sy),
+            None => (sx, sy),
+        };
+        (self.cos * x + self.sin * y, -self.sin * x + self.cos * y)
+    }
+
+    /// An output offset shows a point of the photo.
+    fn on_photo(&self, dx: f32, dy: f32) -> bool {
+        let (sx, sy) = self.source(dx, dy);
+        // A hundredth of a pixel of slack keeps a point on the border in.
+        sx.is_finite()
+            && sy.is_finite()
+            && sx.abs() <= self.width * 0.5 + 0.01
+            && sy.abs() <= self.height * 0.5 + 0.01
+    }
+
+    /// The box around the whole corrected photo: min x, min y, max x, max y.
+    fn bounds(&self) -> [f32; 4] {
+        let (a, b) = (self.width * 0.5, self.height * 0.5);
+        let mut out = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for (sx, sy) in [(-a, -b), (a, -b), (a, b), (-a, b)] {
+            let (x, y) = self.forward(sx, sy);
+            out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+        }
+        out
+    }
+
+    /// Pixel size of the box around the whole corrected photo.
+    pub fn bounds_size(&self) -> (u32, u32) {
+        if self.is_identity() {
+            return (self.width as u32, self.height as u32);
+        }
+        let [x0, y0, x1, y1] = self.bounds();
+        // The small allowance keeps float noise, as at 90°, from adding a column.
+        (
+            (x1 - x0 - 1.0e-3).ceil().max(1.0) as u32,
+            (y1 - y0 - 1.0e-3).ceil().max(1.0) as u32,
+        )
+    }
+
+    /// The photo's centre as fractions of the box from `bounds_size`.
+    pub fn origin_fraction(&self) -> [f32; 2] {
+        if self.is_identity() {
+            return [0.5, 0.5];
+        }
+        let [x0, y0, ..] = self.bounds();
+        let (bw, bh) = self.bounds_size();
+        [-x0 / bw as f32, -y0 / bh as f32]
+    }
+
+    /// The largest upright rectangle centred on the photo's centre that lies
+    /// on the corrected photo: width, height. A turn alone has a closed form.
+    pub fn usable(&self) -> (f32, f32) {
+        let Some(_) = self.perspective else {
+            let (_, _, uw, uh) = usable_rect(self.width, self.height, self.theta);
+            return (uw, uh);
+        };
+        let fits = |a: f32, b: f32| {
+            [(-a, -b), (a, -b), (a, b), (-a, b)]
+                .iter()
+                .all(|&(x, y)| self.on_photo(x, y))
+        };
+        // For a ratio r of half-width to half-height, the largest half-height.
+        let reach = self.width.max(self.height) * 2.0;
+        let largest = |r: f32| {
+            let (mut lo, mut hi) = (0.0f32, reach / r.max(1.0));
+            for _ in 0..32 {
+                let mid = 0.5 * (lo + hi);
+                if fits(mid * r, mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        // Golden-section search for the ratio with the largest area, around
+        // the photo's own ratio.
+        let area = |log_r: f32| {
+            let r = log_r.exp();
+            let b = largest(r);
+            r * b * b
+        };
+        let centre = (self.width / self.height).ln();
+        let (mut lo, mut hi) = (centre - 1.5, centre + 1.5);
+        let golden = 0.618_034f32;
+        let mut x1 = hi - golden * (hi - lo);
+        let mut x2 = lo + golden * (hi - lo);
+        let (mut f1, mut f2) = (area(x1), area(x2));
+        for _ in 0..40 {
+            if f1 < f2 {
+                lo = x1;
+                x1 = x2;
+                f1 = f2;
+                x2 = lo + golden * (hi - lo);
+                f2 = area(x2);
+            } else {
+                hi = x2;
+                x2 = x1;
+                f2 = f1;
+                x1 = hi - golden * (hi - lo);
+                f1 = area(x1);
+            }
+        }
+        let r = (0.5 * (lo + hi)).exp();
+        let b = largest(r);
+        ((2.0 * b * r).max(1.0), (2.0 * b).max(1.0))
+    }
+}
+
+/// The map that takes the photo's rectangle to the keystoned quad: the top
+/// and bottom edges scale by `1 ± k·v`, the right and left by `1 ± k·h`,
+/// and the centre is moved back to the centre.
+fn keystone(vertical: f32, horizontal: f32, width: f32, height: f32) -> Homography {
+    let kv = (KEYSTONE * vertical / 100.0) as f64;
+    let kh = (KEYSTONE * horizontal / 100.0) as f64;
+    let (a, b) = (width as f64 * 0.5, height as f64 * 0.5);
+    let from = [(-a, -b), (a, -b), (a, b), (-a, b)];
+    let to = [
+        (-a * (1.0 + kv), -b * (1.0 - kh)),
+        (a * (1.0 + kv), -b * (1.0 + kh)),
+        (a * (1.0 - kv), b * (1.0 + kh)),
+        (-a * (1.0 - kv), b * (1.0 - kh)),
+    ];
+    let h = homography(from, to);
+    // The centre lands where the quad's diagonals cross. Move it back.
+    let (tx, ty) = apply(&h, 0.0, 0.0);
+    let (tx, ty) = (tx as f64, ty as f64);
+    [
+        h[0] - tx * h[6],
+        h[1] - tx * h[7],
+        h[2] - tx * h[8],
+        h[3] - ty * h[6],
+        h[4] - ty * h[7],
+        h[5] - ty * h[8],
+        h[6],
+        h[7],
+        h[8],
+    ]
+}
+
+/// The projective map that sends four points to four points.
+fn homography(from: [(f64, f64); 4], to: [(f64, f64); 4]) -> Homography {
+    // u = (h0 x + h1 y + h2) / (h6 x + h7 y + 1), v likewise with h3..h5.
+    let mut m = [[0.0f64; 9]; 8];
+    for (i, ((x, y), (u, v))) in from.iter().zip(to.iter()).enumerate() {
+        m[2 * i] = [*x, *y, 1.0, 0.0, 0.0, 0.0, -x * u, -y * u, *u];
+        m[2 * i + 1] = [0.0, 0.0, 0.0, *x, *y, 1.0, -x * v, -y * v, *v];
+    }
+    // Gaussian elimination with partial pivoting.
+    for col in 0..8 {
+        let pivot = (col..8)
+            .max_by(|a, b| m[*a][col].abs().total_cmp(&m[*b][col].abs()))
+            .unwrap();
+        m.swap(col, pivot);
+        let p = m[col][col];
+        for k in col..9 {
+            m[col][k] /= p;
+        }
+        for row in 0..8 {
+            if row != col {
+                let f = m[row][col];
+                for k in col..9 {
+                    m[row][k] -= f * m[col][k];
+                }
+            }
+        }
+    }
+    let mut h = [0.0; 9];
+    for (i, slot) in h.iter_mut().take(8).enumerate() {
+        *slot = m[i][8];
+    }
+    h[8] = 1.0;
+    h
+}
+
+fn invert(h: &Homography) -> Homography {
+    let [a, b, c, d, e, f, g, i, j] = *h;
+    let co = [
+        e * j - f * i,
+        c * i - b * j,
+        b * f - c * e,
+        f * g - d * j,
+        a * j - c * g,
+        c * d - a * f,
+        d * i - e * g,
+        b * g - a * i,
+        a * e - b * d,
+    ];
+    let det = a * co[0] + b * co[3] + c * co[6];
+    co.map(|value| value / det)
+}
+
+fn apply(h: &Homography, x: f32, y: f32) -> (f32, f32) {
+    let (x, y) = (x as f64, y as f64);
+    let w = h[6] * x + h[7] * y + h[8];
+    (
+        ((h[0] * x + h[1] * y + h[2]) / w) as f32,
+        ((h[3] * x + h[4] * y + h[5]) / w) as f32,
+    )
+}
+
+/// The kept rectangle in canvas pixels, where the canvas has the photo's
+/// size and shares its centre: left, top, width, height.
+fn frame_pixels(warp: &Warp, frame: Frame) -> (f32, f32, f32, f32) {
+    // The frame may reach past the usable rectangle where the corrected
+    // photo does. Drags and slider changes keep its corners on the photo.
+    let (uw, uh) = warp.usable();
+    let ux = (warp.width - uw) * 0.5;
+    let uy = (warp.height - uh) * 0.5;
+    let (x, y, w, h) = if warp.is_identity() {
+        // Upright and square on, the photo is the usable rectangle.
         let w = frame.w.clamp(0.0, 1.0);
         let h = frame.h.clamp(0.0, 1.0);
         (frame.x.clamp(0.0, 1.0 - w), frame.y.clamp(0.0, 1.0 - h), w, h)
@@ -1122,12 +1423,12 @@ fn frame_pixels(width: f32, height: f32, theta: f32, frame: Frame) -> (f32, f32,
     (ux + x * uw, uy + y * uh, (w * uw).max(1.0), (h * uh).max(1.0))
 }
 
-/// Horizon, then frame: one resample into an image the size of the frame.
-fn crop_frame(image: &Image, rotation_deg: f32, frame: Frame) -> Image {
-    let theta = rotation_deg.to_radians();
-    let (x0, y0, fw, fh) = frame_pixels(image.width as f32, image.height as f32, theta, frame);
-    if theta.abs() < 1.0e-6 {
-        // No turn: whole pixels, copied without a kernel.
+/// Perspective, horizon, then frame: one resample into an image the size of
+/// the frame.
+fn crop_frame(image: &Image, warp: &Warp, frame: Frame) -> Image {
+    let (x0, y0, fw, fh) = frame_pixels(warp, frame);
+    if warp.is_identity() {
+        // No turn, no keystone: whole pixels, copied without a kernel.
         let left = (x0.round() as u32).min(image.width - 1);
         let top = (y0.round() as u32).min(image.height - 1);
         let width = (fw.round() as u32).clamp(1, image.width - left);
@@ -1136,38 +1437,23 @@ fn crop_frame(image: &Image, rotation_deg: f32, frame: Frame) -> Image {
     }
     let out_w = fw.round().max(1.0) as u32;
     let out_h = fh.round().max(1.0) as u32;
-    resample_region(image, theta, x0, y0, fw, fh, out_w, out_h)
+    resample_region(image, warp, x0, y0, fw, fh, out_w, out_h)
 }
 
-/// The whole rotated photo on a canvas of its own size. The corners the
-/// photo leaves are 0.
-fn rotate_canvas(image: &Image, rotation_deg: f32) -> Image {
-    let (out_w, out_h) = rotated_bounds(image.width, image.height, rotation_deg);
-    // The bounding box shares the photo's centre.
+/// The whole corrected photo in the box that just holds it. What lies
+/// outside the photo is 0.
+fn warp_canvas(image: &Image, warp: &Warp) -> Image {
+    let [min_x, min_y, ..] = warp.bounds();
+    let (out_w, out_h) = warp.bounds_size();
     resample_region(
         image,
-        rotation_deg.to_radians(),
-        (image.width as f32 - out_w as f32) * 0.5,
-        (image.height as f32 - out_h as f32) * 0.5,
+        warp,
+        image.width as f32 * 0.5 + min_x,
+        image.height as f32 * 0.5 + min_y,
         out_w as f32,
         out_h as f32,
         out_w,
         out_h,
-    )
-}
-
-/// Size of the upright box that holds the whole photo turned by the angle.
-pub fn rotated_bounds(width: u32, height: u32, rotation_deg: f32) -> (u32, u32) {
-    let theta = rotation_deg.to_radians();
-    if theta.abs() < 1.0e-6 {
-        return (width, height);
-    }
-    let (sin, cos) = (theta.sin().abs(), theta.cos().abs());
-    let (w, h) = (width as f32, height as f32);
-    // The small allowance keeps float noise, as at 90°, from adding a column.
-    (
-        (w * cos + h * sin - 1.0e-3).ceil() as u32,
-        (w * sin + h * cos - 1.0e-3).ceil() as u32,
     )
 }
 
@@ -1189,13 +1475,13 @@ fn copy_region(image: &Image, left: u32, top: u32, width: u32, height: u32) -> I
 }
 
 /// Samples the canvas region `x0, y0, fw, fh` into `out_w × out_h` pixels.
-/// Coordinates are pixel edges: pixel `i` covers `[i, i + 1)`. Positive
-/// `theta` turns the picture counterclockwise on screen, so the sample for
-/// an output point is found by turning it clockwise about the centre.
+/// Coordinates are pixel edges: pixel `i` covers `[i, i + 1)`, and the
+/// canvas shares the photo's centre. Each output point reads backward
+/// through the warp, so the output has no holes.
 #[allow(clippy::too_many_arguments)]
 fn resample_region(
     image: &Image,
-    theta: f32,
+    warp: &Warp,
     x0: f32,
     y0: f32,
     fw: f32,
@@ -1212,8 +1498,6 @@ fn resample_region(
     let height = image.height as f32;
     let cx = width * 0.5;
     let cy = height * 0.5;
-    let cos = theta.cos();
-    let sin = theta.sin();
     out.rgb
         .par_chunks_mut(out_w as usize * 3)
         .enumerate()
@@ -1221,9 +1505,9 @@ fn resample_region(
             let dy = y0 + (y as f32 + 0.5) * fh / out_h as f32 - cy;
             for (x, px) in row.chunks_exact_mut(3).enumerate() {
                 let dx = x0 + (x as f32 + 0.5) * fw / out_w as f32 - cx;
-                let sx = cos * dx - sin * dy + cx;
-                let sy = sin * dx + cos * dy + cy;
-                if sx < 0.0 || sy < 0.0 || sx > width || sy > height {
+                let (sx, sy) = warp.source(dx, dy);
+                let (sx, sy) = (sx + cx, sy + cy);
+                if !(sx >= 0.0 && sy >= 0.0 && sx <= width && sy <= height) {
                     continue;
                 }
                 // Pixel centres sit at half-integers.
@@ -1315,21 +1599,20 @@ pub fn usable_rect(width: f32, height: f32, theta: f32) -> (f32, f32, f32, f32) 
     ((width - uw) * 0.5, (height - uh) * 0.5, uw, uh)
 }
 
-/// The usable rectangle as fractions of the canvas: left, top, width, height.
 /// The usable rectangle as fractions of the on-screen picture, which is the
-/// whole photo of `width × height` turned and boxed by `rotated_bounds`:
-/// left, top, width, height.
-pub fn usable_fraction(width: u32, height: u32, rotation_deg: f32) -> [f32; 4] {
-    let (_, _, uw, uh) = usable_rect(width as f32, height as f32, rotation_deg.to_radians());
-    let (bw, bh) = rotated_bounds(width, height, rotation_deg);
+/// whole corrected photo in the box from `Warp::bounds_size`: left, top,
+/// width, height.
+pub fn usable_fraction(warp: &Warp) -> [f32; 4] {
+    let (uw, uh) = warp.usable();
+    let (bw, bh) = warp.bounds_size();
     let (bw, bh) = (bw as f32, bh as f32);
-    [(bw - uw) * 0.5 / bw, (bh - uh) * 0.5 / bh, uw / bw, uh / bh]
+    let [ox, oy] = warp.origin_fraction();
+    [ox - uw * 0.5 / bw, oy - uh * 0.5 / bh, uw / bw, uh / bh]
 }
 
-pub fn fit_aspect(aspect: Aspect, rotation_deg: f32, width: f32, height: f32) -> Frame {
-    let theta = rotation_deg.to_radians();
-    let (_, _, uw, uh) = usable_rect(width, height, theta);
-    match aspect.ratio(width, height) {
+pub fn fit_aspect(aspect: Aspect, warp: &Warp) -> Frame {
+    let (uw, uh) = warp.usable();
+    match aspect.ratio(warp.width, warp.height) {
         None => Frame::default(),
         Some(ratio) => {
             let (fw, fh) = if uw / uh > ratio {
@@ -1356,35 +1639,24 @@ const MIN_FRAME: f32 = 0.02;
 struct FrameSpace {
     uw: f32,
     uh: f32,
-    half_w: f32,
-    half_h: f32,
-    cos: f32,
-    sin: f32,
+    warp: Warp,
 }
 
 impl FrameSpace {
-    fn new(rotation_deg: f32, photo_w: f32, photo_h: f32) -> Self {
-        let theta = rotation_deg.to_radians();
-        let (_, _, uw, uh) = usable_rect(photo_w, photo_h, theta);
+    fn new(warp: &Warp) -> Self {
+        let (uw, uh) = warp.usable();
         Self {
             uw,
             uh,
-            half_w: photo_w * 0.5,
-            half_h: photo_h * 0.5,
-            cos: theta.cos(),
-            sin: theta.sin(),
+            warp: *warp,
         }
     }
 
     /// A point given in fractions of the usable rectangle lies on the photo.
     fn on_photo(&self, fx: f32, fy: f32) -> bool {
         // Offsets from the centre, which the usable rectangle shares.
-        let dx = (fx - 0.5) * self.uw;
-        let dy = (fy - 0.5) * self.uh;
-        let sx = self.cos * dx - self.sin * dy;
-        let sy = self.sin * dx + self.cos * dy;
-        // A hundredth of a pixel of slack keeps a corner on the border in.
-        sx.abs() <= self.half_w + 0.01 && sy.abs() <= self.half_h + 0.01
+        self.warp
+            .on_photo((fx - 0.5) * self.uw, (fy - 0.5) * self.uh)
     }
 
     fn fits(&self, frame: Frame) -> bool {
@@ -1433,17 +1705,11 @@ fn lerp_frame(a: Frame, b: Frame, t: f32) -> Frame {
 /// is recomputed in pixels of the new usable rectangle. A frame that no
 /// longer fits is drawn toward the centred fit until its corners are back on
 /// the photo, so a full frame stays the full usable rectangle.
-pub fn clamp_frame_to_photo(
-    frame: Frame,
-    aspect: Aspect,
-    rotation_deg: f32,
-    width: f32,
-    height: f32,
-) -> Frame {
-    let space = FrameSpace::new(rotation_deg, width, height);
+pub fn clamp_frame_to_photo(frame: Frame, aspect: Aspect, warp: &Warp) -> Frame {
+    let space = FrameSpace::new(warp);
     let w = frame.w.max(MIN_FRAME);
     let mut h = frame.h.max(MIN_FRAME);
-    if let Some(ratio) = aspect.ratio(width, height) {
+    if let Some(ratio) = aspect.ratio(warp.width, warp.height) {
         h = w * space.uw / (space.uh * ratio);
     }
     let wanted = Frame {
@@ -1458,7 +1724,7 @@ pub fn clamp_frame_to_photo(
     // The centred fit lies inside the usable rectangle, so it is on the
     // photo. Every frame between the two has its corners between two points
     // on the photo, which is convex, so the search below is sound.
-    let safe = fit_aspect(aspect, rotation_deg, width, height);
+    let safe = fit_aspect(aspect, warp);
     space.furthest(|t| lerp_frame(safe, wanted, t))
 }
 
@@ -1506,16 +1772,14 @@ pub fn drag_frame(
     dx: f32,
     dy: f32,
     aspect: Aspect,
-    rotation_deg: f32,
-    photo_w: f32,
-    photo_h: f32,
+    warp: &Warp,
 ) -> Frame {
-    let space = FrameSpace::new(rotation_deg, photo_w, photo_h);
+    let space = FrameSpace::new(warp);
     // A locked frame whose shape does not match the ratio at this angle, or
     // a frame off the photo, is first put right, so the drag starts from a
     // frame that fits.
-    let start = if aspect.ratio(photo_w, photo_h).is_some() || !space.fits(start) {
-        clamp_frame_to_photo(start, aspect, rotation_deg, photo_w, photo_h)
+    let start = if aspect.ratio(warp.width, warp.height).is_some() || !space.fits(start) {
+        clamp_frame_to_photo(start, aspect, warp)
     } else {
         start
     };
@@ -1535,7 +1799,7 @@ pub fn drag_frame(
             ..moved
         });
     }
-    let Some(ratio) = aspect.ratio(photo_w, photo_h) else {
+    let Some(ratio) = aspect.ratio(warp.width, warp.height) else {
         let target_left = (left + dx).min(right - MIN_FRAME);
         let target_right = (right + dx).max(left + MIN_FRAME);
         let target_top = (top + dy).min(bottom - MIN_FRAME);
@@ -1875,7 +2139,7 @@ mod tests {
     fn rotation_frame_does_not_sample_an_empty_corner() {
         for (w, h, deg) in [(80u32, 60u32, 10.0f32), (80, 60, 30.0), (60, 80, -25.0), (64, 64, 45.0)] {
             let image = flat(w, h, [0.2, 0.2, 0.2]);
-            let out = crop_frame(&image, deg, Frame::default());
+            let out = crop_frame(&image, &Warp::turn(deg, w as f32, h as f32), Frame::default());
             for px in out.rgb.chunks_exact(3) {
                 assert!((px[0] - 0.2).abs() < 1.0e-3, "{w}x{h} at {deg}°: {px:?}");
             }
@@ -1921,7 +2185,7 @@ mod tests {
         let i = ((50 * w + 80) * 3) as usize;
         rgb[i..i + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
         let image = Image::new(w, h, rgb);
-        let out = rotate_canvas(&image, 90.0);
+        let out = warp_canvas(&image, &Warp::turn(90.0, w as f32, h as f32));
         let brightest = out
             .rgb
             .chunks_exact(3)
@@ -1936,16 +2200,87 @@ mod tests {
     #[test]
     fn the_turned_photo_keeps_its_corners_on_screen() {
         let image = flat(80, 40, [0.5, 0.5, 0.5]);
-        let out = rotate_canvas(&image, 20.0);
-        assert_eq!((out.width, out.height), rotated_bounds(80, 40, 20.0));
+        let warp = Warp::turn(20.0, 80.0, 40.0);
+        let out = warp_canvas(&image, &warp);
+        assert_eq!((out.width, out.height), warp.bounds_size());
         assert!(out.width > 80 && out.height > 40);
         // Total light is the photo's: nothing was cut off at the sides.
         let total: f32 = out.rgb.iter().step_by(3).sum();
         assert!((total - 0.5 * 80.0 * 40.0).abs() < 0.02 * 0.5 * 80.0 * 40.0, "{total}");
         // The usable rectangle sits at the centre of the box.
-        let [x, y, w, h] = usable_fraction(80, 40, 20.0);
-        assert!((x + w * 0.5 - 0.5).abs() < 1.0e-4 && (y + h * 0.5 - 0.5).abs() < 1.0e-4);
-        assert_eq!(usable_fraction(80, 40, 0.0), [0.0, 0.0, 1.0, 1.0]);
+        let [x, y, w, h] = usable_fraction(&warp);
+        // Within the pixel the box was rounded up by.
+        let (px, py) = (1.0 / out.width as f32, 1.0 / out.height as f32);
+        assert!((x + w * 0.5 - 0.5).abs() < px && (y + h * 0.5 - 0.5).abs() < py);
+        assert_eq!(usable_fraction(&Warp::turn(0.0, 80.0, 40.0)), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn vertical_keystone_widens_the_top_and_keeps_lines_straight() {
+        let warp = Warp::new(0.0, 40.0, 0.0, 400.0, 300.0);
+        let (tl, _) = warp.forward(-200.0, -150.0);
+        let (bl, _) = warp.forward(-200.0, 150.0);
+        // The top edge spreads to 1 + 0.5 · 0.4 of its width, the bottom
+        // shrinks to 1 − 0.2, about the centre the warp keeps still.
+        let top_width = 2.0 * -tl;
+        let bottom_width = 2.0 * -bl;
+        assert!((top_width / bottom_width - 1.2 / 0.8).abs() < 1.0e-3, "{top_width} {bottom_width}");
+        let centre = warp.forward(0.0, 0.0);
+        assert!(centre.0.abs() < 1.0e-3 && centre.1.abs() < 1.0e-3, "{centre:?}");
+        // Three points on a slanted line stay on one line.
+        let points: Vec<(f32, f32)> = [-0.8f32, 0.1, 0.9]
+            .iter()
+            .map(|t| warp.forward(150.0 * t, 120.0 * t - 30.0))
+            .collect();
+        let cross = (points[1].0 - points[0].0) * (points[2].1 - points[0].1)
+            - (points[1].1 - points[0].1) * (points[2].0 - points[0].0);
+        assert!(cross.abs() < 1.0e-2, "bent line: {cross}");
+        // And back again.
+        for (x, y) in [(-200.0f32, -150.0f32), (37.0, 81.0), (199.0, 149.0)] {
+            let (fx, fy) = warp.forward(x, y);
+            let (sx, sy) = warp.source(fx, fy);
+            assert!((sx - x).abs() < 1.0e-2 && (sy - y).abs() < 1.0e-2);
+        }
+    }
+
+    #[test]
+    fn the_usable_rectangle_of_a_keystone_lies_on_the_photo_and_touches_it() {
+        for (rotation, vertical, horizontal) in [(0.0, 30.0, 0.0), (0.0, 0.0, -45.0), (6.0, -20.0, 15.0)] {
+            let warp = Warp::new(rotation, vertical, horizontal, 400.0, 300.0);
+            let (uw, uh) = warp.usable();
+            let corners = |a: f32, b: f32| [(-a, -b), (a, -b), (a, b), (-a, b)];
+            for (x, y) in corners(uw * 0.5, uh * 0.5) {
+                assert!(warp.on_photo(x, y), "{rotation} {vertical} {horizontal}: corner off the photo");
+            }
+            // One percent bigger no longer fits: it reaches the border.
+            let grown = corners(uw * 0.505, uh * 0.505);
+            assert!(!grown.iter().all(|&(x, y)| warp.on_photo(x, y)));
+            // Square on, the full frame is the whole photo, and a crop has
+            // only photo pixels.
+            let image = flat(400, 300, [0.3, 0.3, 0.3]);
+            let out = crop_frame(&image, &warp, Frame::default());
+            assert!(out.rgb.iter().all(|v| (v - 0.3).abs() < 1.0e-3), "empty pixel in the crop");
+        }
+    }
+
+    #[test]
+    fn mirrors_and_turns_carry_the_corrections_with_the_picture() {
+        let mut adj = Adjustments::defaults(90);
+        adj.rotation = 5.0;
+        adj.vertical = 10.0;
+        adj.horizontal = 20.0;
+        adj.frame = Frame { x: 0.1, y: 0.2, w: 0.3, h: 0.4 };
+        adj.mirror_horizontally();
+        assert_eq!((adj.rotation, adj.vertical, adj.horizontal), (-5.0, 10.0, -20.0));
+        assert!((adj.frame.x - 0.6).abs() < 1.0e-6 && adj.frame.y == 0.2);
+        adj.mirror_horizontally();
+        assert_eq!((adj.rotation, adj.horizontal), (5.0, 20.0));
+        adj.mirror_vertically();
+        assert_eq!((adj.rotation, adj.vertical), (-5.0, -10.0));
+        assert!((adj.frame.y - 0.4).abs() < 1.0e-6);
+        adj.turn_clockwise(0.0, 0.0);
+        // The old top is now the right side; the old right is the bottom.
+        assert_eq!((adj.vertical, adj.horizontal), (-20.0, -10.0));
     }
 
     #[test]
@@ -1953,7 +2288,7 @@ mod tests {
         let rgb: Vec<f32> = (0..20 * 10 * 3).map(|i| (i % 97) as f32 / 97.0).collect();
         let image = Image::new(20, 10, rgb);
         let frame = Frame { x: 0.25, y: 0.2, w: 0.5, h: 0.5 };
-        let out = crop_frame(&image, 0.0, frame);
+        let out = crop_frame(&image, &Warp::turn(0.0, 20.0, 10.0), frame);
         assert_eq!((out.width, out.height), (10, 5));
         assert_eq!(out.pixel(0, 0), image.pixel(5, 2));
         assert_eq!(out.pixel(9, 4), image.pixel(14, 6));
@@ -1962,9 +2297,9 @@ mod tests {
     #[test]
     fn dragging_an_edge_outward_stops_on_the_border() {
         let start = Frame { x: 0.2, y: 0.2, w: 0.5, h: 0.5 };
-        let out = drag_frame(start, Handle::Right, 0.9, 0.0, Aspect::Free, 0.0, 400.0, 300.0);
+        let out = drag_frame(start, Handle::Right, 0.9, 0.0, Aspect::Free, &Warp::turn(0.0, 400.0, 300.0));
         assert!((out.x + out.w - 1.0).abs() < 1.0e-4 && out.x == 0.2, "{out:?}");
-        let out = drag_frame(start, Handle::TopLeft, -0.5, -0.5, Aspect::Free, 0.0, 400.0, 300.0);
+        let out = drag_frame(start, Handle::TopLeft, -0.5, -0.5, Aspect::Free, &Warp::turn(0.0, 400.0, 300.0));
         assert!(out.x.abs() < 1.0e-4 && out.y.abs() < 1.0e-4, "{out:?}");
         assert!((out.w - 0.7).abs() < 1.0e-4 && (out.h - 0.7).abs() < 1.0e-4);
     }
@@ -1973,16 +2308,16 @@ mod tests {
     fn a_turned_photo_lets_the_frame_reach_past_the_usable_rectangle() {
         // At 10°, the photo stands above the usable rectangle at its middle
         // and reaches past it at the sides halfway down.
-        let space = FrameSpace::new(10.0, 400.0, 300.0);
+        let space = FrameSpace::new(&Warp::turn(10.0, 400.0, 300.0));
         let narrow = Frame { x: 0.45, y: 0.2, w: 0.1, h: 0.6 };
-        let up = drag_frame(narrow, Handle::Top, 0.0, -1.0, Aspect::Free, 10.0, 400.0, 300.0);
+        let up = drag_frame(narrow, Handle::Top, 0.0, -1.0, Aspect::Free, &Warp::turn(10.0, 400.0, 300.0));
         assert!(up.y < -0.02, "the top edge stayed on the usable rectangle: {up:?}");
         assert!(space.fits(up));
         // It stopped on the border: a little further is off the photo.
         assert!(!space.fits(Frame { y: up.y - 0.002, h: up.h + 0.002, ..up }));
 
         let small = Frame { x: 0.4, y: 0.45, w: 0.1, h: 0.1 };
-        let left = drag_frame(small, Handle::Move, -1.0, 0.0, Aspect::Free, 10.0, 400.0, 300.0);
+        let left = drag_frame(small, Handle::Move, -1.0, 0.0, Aspect::Free, &Warp::turn(10.0, 400.0, 300.0));
         assert!(left.x < -0.01 && space.fits(left), "{left:?}");
         assert_eq!((left.w, left.h, left.y), (small.w, small.h, small.y));
     }
@@ -1990,29 +2325,29 @@ mod tests {
     #[test]
     fn a_locked_ratio_holds_in_pixels_while_dragging() {
         let (pw, ph) = (300.0, 200.0);
-        let start = fit_aspect(Aspect::R1x1, 0.0, pw, ph);
-        let out = drag_frame(start, Handle::BottomRight, -0.2, -0.05, Aspect::R1x1, 0.0, pw, ph);
+        let start = fit_aspect(Aspect::R1x1, &Warp::turn(0.0, pw, ph));
+        let out = drag_frame(start, Handle::BottomRight, -0.2, -0.05, Aspect::R1x1, &Warp::turn(0.0, pw, ph));
         assert!((out.w * pw - out.h * ph).abs() < 1.0e-3, "{out:?}");
         assert!(out.x + out.w <= 1.0 + 1.0e-4 && out.y + out.h <= 1.0 + 1.0e-4);
-        let grown = drag_frame(out, Handle::Left, -2.0, 0.0, Aspect::R1x1, 0.0, pw, ph);
+        let grown = drag_frame(out, Handle::Left, -2.0, 0.0, Aspect::R1x1, &Warp::turn(0.0, pw, ph));
         assert!((grown.w * pw - grown.h * ph).abs() < 1.0e-2 && grown.h <= 1.0 + 1.0e-4);
         // Turned, the ratio still holds in pixels of the usable rectangle.
-        let space = FrameSpace::new(12.0, pw, ph);
-        let turned = drag_frame(start, Handle::TopRight, 1.0, -1.0, Aspect::R1x1, 12.0, pw, ph);
+        let space = FrameSpace::new(&Warp::turn(12.0, pw, ph));
+        let turned = drag_frame(start, Handle::TopRight, 1.0, -1.0, Aspect::R1x1, &Warp::turn(12.0, pw, ph));
         assert!(space.fits(turned));
         assert!((turned.w * space.uw - turned.h * space.uh).abs() < 1.0e-2, "{turned:?}");
     }
 
     #[test]
     fn a_frame_is_pulled_back_onto_the_photo_when_the_angle_grows() {
-        let frame = fit_aspect(Aspect::R1x1, 0.0, 400.0, 300.0);
-        let turned = clamp_frame_to_photo(frame, Aspect::R1x1, 20.0, 400.0, 300.0);
-        let space = FrameSpace::new(20.0, 400.0, 300.0);
+        let frame = fit_aspect(Aspect::R1x1, &Warp::turn(0.0, 400.0, 300.0));
+        let turned = clamp_frame_to_photo(frame, Aspect::R1x1, &Warp::turn(20.0, 400.0, 300.0));
+        let space = FrameSpace::new(&Warp::turn(20.0, 400.0, 300.0));
         assert!(space.fits(turned), "{turned:?}");
         assert!((turned.w * space.uw - turned.h * space.uh).abs() < 1.0e-2, "{turned:?}");
         // A full frame stays the full usable rectangle at any angle.
         assert_eq!(
-            clamp_frame_to_photo(Frame::default(), Aspect::Free, 20.0, 400.0, 300.0),
+            clamp_frame_to_photo(Frame::default(), Aspect::Free, &Warp::turn(20.0, 400.0, 300.0)),
             Frame::default()
         );
     }
