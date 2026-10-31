@@ -78,7 +78,7 @@ impl Slider {
     }
 
     /// Values snap to this step so a drag can land exactly on 0.
-    fn step(self) -> f32 {
+    pub fn step(self) -> f32 {
         match self {
             Slider::Exposure => 0.05,
             Slider::Rotation => 0.1,
@@ -158,15 +158,43 @@ impl Track {
     }
 }
 
-/// One of the O / Of / S / Sf buttons. Each draws its own label.
+/// One of the O / Of / S / Sf buttons. Its label is in `Panel::texts`.
 #[derive(Clone, Copy, Debug)]
 pub struct CompareButton {
-    pub text: &'static str,
     pub rect: [f32; 4],
-    /// Top of the label's line.
-    pub top: f32,
     pub enabled: bool,
     pub held: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    /// A group title.
+    Heading,
+    /// A button that does nothing yet.
+    Disabled,
+    /// A message under the buttons. It may wrap.
+    Notice,
+}
+
+/// A line of panel text, placed on its own.
+#[derive(Clone, Debug)]
+pub struct Text {
+    pub text: String,
+    pub x0: f32,
+    pub x1: f32,
+    pub top: f32,
+    pub align: Align,
+    pub tone: Tone,
+    /// The row this text names, so a highlighted row can brighten it.
+    pub row: Option<Hit>,
 }
 
 pub struct Panel {
@@ -178,22 +206,38 @@ pub struct Panel {
     /// Backgrounds for the button rows: x0, y0, x1, y1.
     pub buttons: Vec<[f32; 4]>,
     pub compare: Vec<CompareButton>,
-    pub text: String,
-    pub text_top: f32,
+    pub texts: Vec<Text>,
     pub histogram: [f32; 4],
 }
 
 impl Panel {
+    /// The pointer is on the divider between the picture and the panel.
+    pub fn on_divider(&self, cursor_x: f32) -> bool {
+        (cursor_x - self.x).abs() <= 6.0 * self.scale
+    }
+
     pub fn track(&self, slider: Slider) -> Option<Track> {
         self.tracks.iter().copied().find(|track| track.slider == slider)
     }
+
+    /// The row's rectangle: x0, y0, x1, y1.
+    pub fn row_rect(&self, hit: Hit) -> Option<[f32; 4]> {
+        self.rows
+            .iter()
+            .find(|row| row.0 == hit)
+            .map(|&(_, x0, x1, y0, y1)| [x0, y0, x1, y1])
+    }
 }
+
+/// Height of one line of panel text, at scale 1. The GPU text layer lays
+/// labels out with the same line height.
+pub const LINE_HEIGHT: f32 = 22.0;
 
 struct Builder {
     rows: Vec<(Hit, f32, f32, f32, f32)>,
     tracks: Vec<Track>,
     buttons: Vec<[f32; 4]>,
-    lines: Vec<String>,
+    texts: Vec<Text>,
     y: f32,
     row_h: f32,
     x0: f32,
@@ -203,8 +247,23 @@ struct Builder {
 }
 
 impl Builder {
+    fn text(&mut self, text: String, x0: f32, x1: f32, align: Align, tone: Tone, row: Option<Hit>) {
+        let top = self.y + (self.row_h - LINE_HEIGHT * self.scale) * 0.5;
+        self.texts.push(Text {
+            text,
+            x0,
+            x1,
+            top,
+            align,
+            tone,
+            row,
+        });
+    }
+
+    /// A group title, with room above it to set the group apart.
     fn heading(&mut self, label: &str) {
-        self.lines.push(label.to_uppercase());
+        self.y += 10.0 * self.scale;
+        self.text(label.to_uppercase(), self.x0, self.x1, Align::Left, Tone::Heading, None);
         self.y += self.row_h;
     }
 
@@ -212,23 +271,29 @@ impl Builder {
         let inset = 2.0 * self.scale;
         self.buttons
             .push([self.x0, self.y + inset, self.x1, self.y + self.row_h - inset]);
-        self.row(hit, label);
+        let pad = 8.0 * self.scale;
+        self.text(label, self.x0 + pad, self.x1 - pad, Align::Left, Tone::Normal, Some(hit));
+        self.row(hit);
     }
 
+    /// Title on the left, value right-aligned against the track.
     fn slider(&mut self, slider: Slider, adj: &Adjustments) {
+        let hit = Hit::Slider(slider);
+        let value_x1 = self.track_x0 - 10.0 * self.scale;
+        self.text(slider.label().into(), self.x0, value_x1, Align::Left, Tone::Normal, Some(hit));
+        self.text(slider_value(slider, adj), self.x0, value_x1, Align::Right, Tone::Normal, Some(hit));
         self.tracks.push(Track {
             slider,
             x0: self.track_x0,
             x1: self.x1 - 6.0 * self.scale,
             y: self.y + self.row_h * 0.5,
         });
-        self.row(Hit::Slider(slider), slider_line(slider, adj));
+        self.row(hit);
     }
 
-    fn row(&mut self, hit: Hit, label: String) {
+    fn row(&mut self, hit: Hit) {
         self.rows
             .push((hit, self.x0, self.x1, self.y, self.y + self.row_h));
-        self.lines.push(label);
         self.y += self.row_h;
     }
 }
@@ -248,30 +313,31 @@ pub fn layout(
 ) -> Panel {
     let scale = scale.max(1.0);
     let x = window_w * (1.0 - split.clamp(0.18, 0.5));
-    let top = 8.0 * scale;
+    let top = 10.0 * scale;
     let hist_h = 72.0 * scale;
-    let x0 = x + 8.0;
-    let x1 = window_w - 8.0;
+    // Controls sit in from the divider, clear of its grip.
+    let x0 = x + 18.0 * scale;
+    let x1 = window_w - 12.0 * scale;
     let histogram = [x0, top, x1, top + hist_h];
     let width = x1 - x0;
-    // Labels need about 120 px at 15 px type. The track keeps at least 60.
-    let label_w = (width * 0.45)
-        .max(120.0 * scale)
+    // A title and its value need about 150 px at 15 px type. The track keeps
+    // at least 60.
+    let label_w = (width * 0.5)
+        .max(150.0 * scale)
         .min(width - 60.0 * scale)
         .max(0.0);
     let mut b = Builder {
         rows: Vec::new(),
         tracks: Vec::new(),
         buttons: Vec::new(),
-        lines: Vec::new(),
-        y: histogram[3] + 8.0,
-        row_h: 22.0 * scale,
+        texts: Vec::new(),
+        y: histogram[3] + 10.0 * scale,
+        row_h: LINE_HEIGHT * scale,
         x0,
         x1,
         track_x0: x0 + label_w,
         scale,
     };
-    let text_top = b.y;
     b.button(Hit::Guide, format!("Guide  {}", guide.label()));
     b.button(Hit::MirrorH, format!("Mirror horizontal  {}", mark(adj.mirror_horizontal)));
     b.button(Hit::MirrorV, format!("Mirror vertical  {}", mark(adj.mirror_vertical)));
@@ -296,11 +362,9 @@ pub fn layout(
     b.heading("Frame");
     b.button(Hit::Aspect, format!("Aspect  {}", adj.aspect.label()));
     b.slider(Slider::Rotation, adj);
-    b.lines.push(String::new());
-    b.y += b.row_h;
+    b.heading("Output");
     b.slider(Slider::Quality, adj);
-    // The compare row has no text in the block: each button draws its label.
-    b.lines.push(String::new());
+    b.y += 10.0 * scale;
     let gap = 4.0 * scale;
     let inset = 2.0 * scale;
     let span = (x1 - x0 + gap) / 4.0;
@@ -319,18 +383,19 @@ pub fn layout(
         // S and Sf need a save of the open file.
         let enabled =
             has_save || matches!(which, ImageControls::Original | ImageControls::OriginalFramed);
+        let hit = Hit::Compare(which);
         if enabled {
-            b.rows.push((Hit::Compare(which), left, right, b.y, b.y + b.row_h));
+            b.rows.push((hit, left, right, b.y, b.y + b.row_h));
         }
+        let tone = if enabled { Tone::Normal } else { Tone::Disabled };
+        b.text(text.into(), left, right, Align::Center, tone, Some(hit));
         compare.push(CompareButton {
-            text,
             rect: [left, b.y + inset, right, b.y + b.row_h - inset],
-            top: b.y,
             enabled,
             held: holding == Some(which),
         });
     }
-    b.y += b.row_h;
+    b.y += b.row_h + 6.0 * scale;
     if confirm_exit {
         b.button(Hit::ConfirmYes, "Discard changes".into());
         b.button(Hit::ConfirmNo, "Keep editing".into());
@@ -339,11 +404,14 @@ pub fn layout(
         b.button(Hit::SaveCopy, "Save as copy".into());
         b.button(Hit::Exit, "Exit".into());
     }
-    if let Some(name) = copy_name {
-        b.lines.push(format!("Copy name  {name}_"));
-    }
-    if let Some(message) = message {
-        b.lines.push(message.to_string());
+    b.y += 4.0 * scale;
+    for line in copy_name
+        .map(|name| format!("Copy name  {name}_"))
+        .into_iter()
+        .chain(message.map(str::to_string))
+    {
+        b.text(line, x0, x1, Align::Left, Tone::Notice, None);
+        b.y += b.row_h;
     }
     let _ = window_h;
     Panel {
@@ -353,8 +421,7 @@ pub fn layout(
         tracks: b.tracks,
         buttons: b.buttons,
         compare,
-        text: b.lines.join("\n"),
-        text_top,
+        texts: b.texts,
         histogram,
     }
 }
@@ -363,7 +430,7 @@ fn mark(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-fn slider_line(slider: Slider, adj: &Adjustments) -> String {
+fn slider_value(slider: Slider, adj: &Adjustments) -> String {
     let value = slider.get(adj);
     let shown = match slider {
         Slider::Quality => format!("{value:.0}"),
@@ -372,17 +439,16 @@ fn slider_line(slider: Slider, adj: &Adjustments) -> String {
         _ => format!("{:+.0}", value),
     };
     // `+0` reads as a change. Zero is shown bare.
-    let shown = match shown.as_str() {
+    match shown.as_str() {
         "+0" | "-0" => "0".into(),
         "+0.00" | "-0.00" => "0.00".into(),
         "+0.0°" | "-0.0°" => "0.0°".into(),
         _ => shown,
-    };
-    format!("{}  {shown}", slider.label())
+    }
 }
 
 pub fn hit_test(panel: &Panel, cursor_x: f32, cursor_y: f32) -> Option<Hit> {
-    if (cursor_x - panel.x).abs() <= 6.0 {
+    if panel.on_divider(cursor_x) {
         return Some(Hit::Divider);
     }
     if cursor_x < panel.x {
@@ -413,6 +479,32 @@ mod tests {
         assert!((track.value_at(mid)).abs() < 1.0e-3);
         assert!((track.delta(track.x1 - track.x0) - 200.0).abs() < 1.0e-3);
         assert_eq!(panel.tracks.len(), 13);
+    }
+
+    #[test]
+    fn rows_have_a_margin_and_groups_have_room_above_their_titles() {
+        let adj = Adjustments::defaults(90);
+        let panel = layout(
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+        );
+        // Every control starts clear of the divider.
+        for (_, x0, ..) in &panel.rows {
+            assert!(*x0 >= panel.x + 16.0, "control at {x0}, divider at {}", panel.x);
+        }
+        // A slider row has its title on the left and its value right-aligned
+        // before the track.
+        let exposure = Some(Hit::Slider(Slider::Exposure));
+        let texts: Vec<&Text> = panel.texts.iter().filter(|text| text.row == exposure).collect();
+        assert_eq!(texts.len(), 2);
+        assert_eq!((texts[0].text.as_str(), texts[0].align), ("Exposure", Align::Left));
+        assert_eq!((texts[1].text.as_str(), texts[1].align), ("0.00", Align::Right));
+        assert!(texts[1].x1 < panel.track(Slider::Exposure).unwrap().x0);
+        // The gap above "COLOR" is wider than the gap between two rows.
+        let contrast = panel.row_rect(Hit::Slider(Slider::Contrast)).unwrap();
+        let temperature = panel.row_rect(Hit::Slider(Slider::Temperature)).unwrap();
+        let heading = panel.texts.iter().find(|text| text.text == "COLOR").unwrap();
+        assert!(heading.top > contrast[3] + 5.0);
+        assert!(temperature[1] > heading.top + LINE_HEIGHT - 1.0);
     }
 
     #[test]

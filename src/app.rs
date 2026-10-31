@@ -21,11 +21,11 @@ use winit::window::{CursorIcon, Fullscreen, Icon, Window};
 use crate::catalog::{is_video, Catalog, Refresh};
 use crate::decode::{DecodedImage, Decoder, UserEvent};
 use crate::edit::{
-    clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, EditWorker,
+    clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, Align, EditWorker,
     Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
-    Rendered, SaveTarget, Saved, Slider, WorkerEvent,
+    Rendered, SaveTarget, Saved, Slider, Tone, WorkerEvent,
 };
-use crate::gpu::Label;
+use crate::gpu::{Label, LabelAlign};
 use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
 use crate::info::format_image_info;
 use crate::playback::VideoSession;
@@ -231,6 +231,9 @@ enum Prompt {
 
 /// Two presses on the same slider within this reset it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// The full-size render waits this long after the last wheel step on a
+/// slider. Each step shows the drag-size picture at once.
+const WHEEL_SETTLE: Duration = Duration::from_millis(250);
 
 struct Editing {
     loaded: Arc<crate::edit::LoadedSession>,
@@ -259,6 +262,11 @@ struct Editing {
     saving: bool,
     pointer: Option<EditPointer>,
     last_slider_press: Option<(Slider, Instant)>,
+    /// Part of a wheel step not yet applied, for touchpads that scroll in
+    /// fractions. Kept per slider.
+    wheel_rest: Option<(Slider, f32)>,
+    /// When to run the full-size render after wheel steps.
+    wheel_settle: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -313,6 +321,10 @@ pub struct App {
     editing: Option<Editing>,
     shift_down: bool,
     cursor_icon: CursorIcon,
+    /// The pointer is over the panel divider, or dragging it.
+    divider_hot: bool,
+    /// The panel row or button under the pointer.
+    hover: Option<EditHit>,
     pub fatal: Option<String>,
 }
 
@@ -349,6 +361,8 @@ impl App {
             editing: None,
             shift_down: false,
             cursor_icon: CursorIcon::Default,
+            divider_hot: false,
+            hover: None,
             fatal: None,
         }
     }
@@ -837,6 +851,8 @@ impl App {
             saving: false,
             pointer: None,
             last_slider_press: None,
+            wheel_rest: None,
+            wheel_settle: None,
         });
         self.prompt = None;
         self.request_edit_render();
@@ -969,16 +985,36 @@ impl App {
             quads.push(ExtraQuad { x0, y0, x1, y1, color });
         };
         quad(panel.x, 0.0, self.window_size.x, self.window_size.y, [0.08, 0.08, 0.08, 0.94]);
-        quad(panel.x - 1.0, 0.0, panel.x + 1.0, self.window_size.y, [1.0, 1.0, 1.0, 0.35]);
+        // The divider: a line the full height, and a grip halfway down that
+        // lights up under the pointer.
+        let s = panel.scale;
+        let accent = [0.36, 0.62, 1.0, 0.95];
+        let (line_half, line_color) = if self.divider_hot {
+            (1.5 * s, accent)
+        } else {
+            (1.0, [1.0, 1.0, 1.0, 0.35])
+        };
+        quad(panel.x - line_half, 0.0, panel.x + line_half, self.window_size.y, line_color);
+        let mid = self.window_size.y * 0.5;
+        let grip = if self.divider_hot { accent } else { [0.78, 0.78, 0.78, 0.95] };
+        quad(panel.x - 4.0 * s, mid - 22.0 * s, panel.x + 4.0 * s, mid + 22.0 * s, grip);
+        for offset in [-7.0, 0.0, 7.0] {
+            let y = mid + offset * s;
+            quad(panel.x - 2.0 * s, y - 0.75 * s, panel.x + 2.0 * s, y + 0.75 * s, [0.1, 0.1, 0.1, 0.9]);
+        }
         for [x0, y0, x1, y1] in &panel.buttons {
             quad(*x0, *y0, *x1, *y1, [1.0, 1.0, 1.0, 0.07]);
         }
-        let s = panel.scale;
         let active = match editing.pointer {
             Some(EditPointer::Slider { slider, .. }) => Some(slider),
             _ => None,
         };
-        let accent = [0.36, 0.62, 1.0, 0.95];
+        // The row under the pointer, or being dragged: title, value, track.
+        if let Some(slider) = self.highlighted_slider() {
+            if let Some([x0, y0, x1, y1]) = panel.row_rect(EditHit::Slider(slider)) {
+                quad(x0 - 6.0 * s, y0, x1 + 4.0 * s, y1, [1.0, 1.0, 1.0, 0.09]);
+            }
+        }
         for track in &panel.tracks {
             let slider = track.slider;
             let y = track.y;
@@ -1027,6 +1063,14 @@ impl App {
                 [1.0, 1.0, 1.0, 0.025]
             };
             quad(x0, y0, x1, y1, fill);
+        }
+        // A button under the pointer brightens. Its row is the button's
+        // rectangle without the inset its background has.
+        if let Some(hit) = self.hover.filter(|hit| !matches!(hit, EditHit::Slider(_))) {
+            if let Some([x0, y0, x1, y1]) = panel.row_rect(hit) {
+                let inset = 2.0 * s;
+                quad(x0, y0 + inset, x1, y1 - inset, [1.0, 1.0, 1.0, 0.12]);
+            }
         }
         if let Some((photo, _, screen)) = self.edit_rects() {
             // The margin outside the frame is dimmed, and so are the empty
@@ -1457,6 +1501,50 @@ impl App {
         true
     }
 
+    /// The slider row to highlight: the one being dragged, else the one
+    /// under the pointer.
+    fn highlighted_slider(&self) -> Option<Slider> {
+        match self.editing.as_ref()?.pointer {
+            Some(EditPointer::Slider { slider, .. }) => Some(slider),
+            Some(_) => None,
+            None => match self.hover {
+                Some(EditHit::Slider(slider)) => Some(slider),
+                _ => None,
+            },
+        }
+    }
+
+    /// Moves `slider` by whole steps of the wheel, one slider step each.
+    fn wheel_slider(&mut self, slider: Slider, steps: f32) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        let rest = match editing.wheel_rest {
+            Some((last, rest)) if last == slider => rest,
+            _ => 0.0,
+        } + steps;
+        let whole = rest.trunc();
+        editing.wheel_rest = Some((slider, rest - whole));
+        let before = slider.get(&editing.current);
+        let value = slider.snap(before + whole * slider.step());
+        if value == before {
+            return;
+        }
+        apply_slider(editing, slider, value);
+        if slider == Slider::Quality {
+            self.request_redraw();
+            return;
+        }
+        editing.wheel_settle = Some(Instant::now() + WHEEL_SETTLE);
+        // Drag-size picture now. The full size waits for the wheel to rest.
+        editing.scrubbing = true;
+        self.request_edit_render();
+        if let Some(editing) = self.editing.as_mut() {
+            editing.scrubbing = false;
+        }
+        self.request_redraw();
+    }
+
     /// The pointer guide follows the pointer, so every move redraws it.
     fn pointer_guide_shown(&self) -> bool {
         self.editing
@@ -1466,8 +1554,36 @@ impl App {
 
     /// Resize arrows over the frame's edges, a move cursor inside it.
     fn update_edit_cursor(&mut self) {
-        let icon = if self.editing.is_some() {
-            let handle = match self.editing.as_ref().and_then(|editing| editing.pointer) {
+        let pointer = self.editing.as_ref().and_then(|editing| editing.pointer);
+        let divider = match pointer {
+            Some(EditPointer::Divider) => true,
+            Some(_) => false,
+            None => {
+                self.cursor_valid
+                    && self
+                        .edit_panel()
+                        .is_some_and(|panel| panel.on_divider(self.cursor.x))
+            }
+        };
+        if divider != self.divider_hot {
+            self.divider_hot = divider;
+            self.request_redraw();
+        }
+        let hover = match pointer {
+            None if self.cursor_valid && !divider => self
+                .edit_panel()
+                .and_then(|panel| hit_test(&panel, self.cursor.x, self.cursor.y))
+                .filter(|hit| *hit != EditHit::Divider),
+            _ => None,
+        };
+        if hover != self.hover {
+            self.hover = hover;
+            self.request_redraw();
+        }
+        let icon = if divider {
+            CursorIcon::EwResize
+        } else if self.editing.is_some() {
+            let handle = match pointer {
                 Some(EditPointer::Frame { handle, .. }) => Some(handle),
                 Some(_) => None,
                 None => self.frame_handle_at(self.cursor),
@@ -1766,6 +1882,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        let wheel_settled = self.editing.as_mut().is_some_and(|editing| {
+            let due = editing.wheel_settle.is_some_and(|at| now >= at);
+            if due {
+                editing.wheel_settle = None;
+            }
+            due
+        });
+        if wheel_settled {
+            self.request_edit_render();
+        }
+
         let fullscreen = self.is_fullscreen();
         let visible = self.cursor_visibility.poll(now, fullscreen);
         if visible {
@@ -1781,6 +1908,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let mut wake_at = self.folder_dirty_until;
+        if let Some(at) = self.editing.as_ref().and_then(|editing| editing.wheel_settle) {
+            wake_at = Some(wake_at.map_or(at, |existing| existing.min(at)));
+        }
         if fullscreen {
             if let Some(until) = self.cursor_visibility.wake_at() {
                 wake_at = Some(wake_at.map_or(until, |existing| existing.min(until)));
@@ -1887,6 +2017,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 // The pointer guide hides while the pointer is off the photo.
                 self.cursor_valid = false;
+                self.update_edit_cursor();
                 if self.pointer_guide_shown() {
                     self.request_redraw();
                 }
@@ -1923,6 +2054,16 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(image) = self.image_size() else {
                     return;
                 };
+                if let Some(panel) = self.edit_panel() {
+                    // Over the panel the wheel steps the highlighted slider
+                    // and never zooms the picture.
+                    if self.cursor.x >= panel.x - 6.0 * panel.scale {
+                        if let Some(EditHit::Slider(slider)) = self.hover {
+                            self.wheel_slider(slider, steps);
+                        }
+                        return;
+                    }
+                }
                 let window = if self.editing.is_some() {
                     self.picture_window()
                 } else {
@@ -2034,15 +2175,33 @@ impl ApplicationHandler<UserEvent> for App {
                 let transport = self.transport_draw(label.as_deref());
                 let quads = self.edit_quads();
                 let panel = self.edit_panel();
+                let bright = self
+                    .highlighted_slider()
+                    .map(EditHit::Slider)
+                    .or(self.hover);
                 let labels: Vec<Label> = panel
                     .iter()
-                    .flat_map(|panel| &panel.compare)
-                    .map(|button| Label {
-                        text: button.text,
-                        x0: button.rect[0],
-                        x1: button.rect[2],
-                        top: button.top,
-                        color: if button.enabled { [255, 255, 255] } else { [105, 105, 105] },
+                    .flat_map(|panel| &panel.texts)
+                    .map(|text| Label {
+                        text: &text.text,
+                        x0: text.x0,
+                        x1: text.x1,
+                        top: text.top,
+                        color: match text.tone {
+                            Tone::Normal if text.row.is_some() && text.row == bright => {
+                                [255, 255, 255]
+                            }
+                            Tone::Normal => [212, 212, 212],
+                            Tone::Heading => [128, 140, 158],
+                            Tone::Disabled => [100, 100, 100],
+                            Tone::Notice => [240, 208, 140],
+                        },
+                        align: match text.align {
+                            Align::Left => LabelAlign::Left,
+                            Align::Center => LabelAlign::Center,
+                            Align::Right => LabelAlign::Right,
+                        },
+                        wrap: text.tone == Tone::Notice,
                     })
                     .collect();
                 let frame = Frame {
@@ -2056,9 +2215,6 @@ impl ApplicationHandler<UserEvent> for App {
                     transport: if self.editing.is_some() { None } else { transport },
                     scale_factor,
                     extra: &quads,
-                    panel_text: panel.as_ref().map(|panel| panel.text.as_str()),
-                    panel_left: panel.as_ref().map(|panel| panel.x + 8.0).unwrap_or(0.0),
-                    panel_top: panel.as_ref().map(|panel| panel.text_top).unwrap_or(0.0),
                     labels: &labels,
                 };
                 let Some(gpu) = &mut self.gpu else {

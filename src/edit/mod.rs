@@ -8,7 +8,7 @@ mod worker;
 
 pub use files::{load_session, LoadedSession};
 pub use image::Image;
-pub use panel::{hit_test, layout, Hit, Panel, Slider, DRAG_LONG_SIDE};
+pub use panel::{hit_test, layout, Align, Hit, Panel, Slider, Tone, DRAG_LONG_SIDE};
 pub use pipeline::{
     clamp_frame_to_photo, drag_frame, Adjustments, Frame, Guide, Handle, ImageControls,
 };
