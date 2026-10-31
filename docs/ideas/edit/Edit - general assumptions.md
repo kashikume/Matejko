@@ -70,6 +70,8 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "quarter_turns": 0,
     "mirror_horizontal": false,
     "mirror_vertical": false,
+    "temperature": 0.0,
+    "tint": 0.0,
     "exposure_ev": 0.0,
     "blackpoint": 0.0,
     "shadow": 0,
@@ -86,7 +88,7 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
 }
 ```
 
-`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
+`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (−100…+100 for temperature and tint, stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
 
 One value per control, in the pipeline order below. The stack is that pipeline, run from the baseline. It is not a list the user reorders, and it is not one entry per slider twitch. JPEG quality is stored with them and is not a stage in that stack.
 
@@ -164,15 +166,16 @@ Each preview and each render is one run. A control at its default is skipped. Th
 
 | Order | Stage | Work buffer | Note |
 | 1 | Orient | New linear buffer, one source pixel per output pixel. No resample. | Below |
-| 2 | Exposure | In place. `L = L · 2^ev`. No clamp at 1. | `Edit - exposure.md` |
-| 3 | Blackpoint | In place, per channel, one shared threshold. | `Edit - blackpoint.md` |
-| 4 | Shadow, Highlight | Neighborhood reads. A new linear buffer becomes work. Luma scratch is binary32. | `Edit - shadows and highlights.md` |
-| 5 | Brightness | Encode, formula, decode, as above. | `Edit - brightness.md` |
-| 6 | Contrast | Encode, formula, decode. | `Edit - contrast.md` |
-| 7 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
-| 8 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
-| 9 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
-| 10–11 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
+| 2 | Temperature, Tint | In place. One 3×3 matrix per run, applied to each pixel. No clamp at 1. | `Edit - temperature and tint.md` |
+| 3 | Exposure | In place. `L = L · 2^ev`. No clamp at 1. | `Edit - exposure.md` |
+| 4 | Blackpoint | In place, per channel, one shared threshold. | `Edit - blackpoint.md` |
+| 5 | Shadow, Highlight | Neighborhood reads. A new linear buffer becomes work. Luma scratch is binary32. | `Edit - shadows and highlights.md` |
+| 6 | Brightness | Encode, formula, decode, as above. | `Edit - brightness.md` |
+| 7 | Contrast | Encode, formula, decode. | `Edit - contrast.md` |
+| 8 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
+| 9 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
+| 10 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
+| 11–12 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
 
 ### Orient
 

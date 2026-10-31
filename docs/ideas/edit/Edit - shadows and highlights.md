@@ -92,6 +92,8 @@ r starts at 10% of the short side, inside 5–15%. ε starts at 0.02², in units
 
 A local Laplacian remapped only at the coarsest pyramid level is the same split. The guided filter is the one to code.
 
+The window is hundreds of pixels wide on a phone photo, and the base it produces is smooth. Solve `a` and `b` on a box-averaged copy of L whose short side is about 512 px, with r divided by the same step. Upsample `mean(a)` and `mean(b)` bilinearly, and apply them to the full-resolution L. This is the fast guided filter. The edge still follows the full-resolution guide, because the last step multiplies by L itself. A preview and a render then solve on grids of about the same size, so they agree.
+
 ### Shadow
 
 S is the Shadow slider in [−100, +100].
@@ -217,3 +219,4 @@ At and above t_n the hue is the input hue. A neutral has ratios of 1 and stays n
 - Affinity Photo 2 help, “Shadows / Highlights” filter. Stronger manipulation of those regions: reduce contrast, boost shadow detail, recover highlight detail. Range, moved right, includes a greater range of tones.
 - Affinity Photo 2 help, “Basic panel”. Shadows & Highlights applies a tonal adjustment to the darkest and lightest areas.
 - He, Sun, Tang. “Guided Image Filtering.” IEEE Transactions on Pattern Analysis and Machine Intelligence, 2013. The self-guided filter above is this filter.
+- He, Sun. “Fast Guided Filter.” arXiv:1505.00996, 2015. Coefficients solved on a subsampled guide, upsampled, and applied at full resolution.

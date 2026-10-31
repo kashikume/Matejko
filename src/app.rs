@@ -20,7 +20,12 @@ use winit::window::{Fullscreen, Icon, Window};
 
 use crate::catalog::{is_video, Catalog, Refresh};
 use crate::decode::{DecodedImage, Decoder, UserEvent};
-use crate::gpu::{Frame, Gpu, TransportDraw};
+use crate::edit::{
+    clamp_frame_to_photo, frame_screen, hit_test, layout, Adjustments, EditWorker, Guide,
+    Hit as EditHit, Image as LinearImage, ImageControls, Rendered, SaveTarget, Saved, Slider,
+    WorkerEvent,
+};
+use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
 use crate::info::format_image_info;
 use crate::playback::VideoSession;
 use crate::transport::{self, Hit};
@@ -42,6 +47,7 @@ pub enum Command {
     Info,
     OpenWith,
     Pause,
+    Edit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +57,7 @@ pub enum Mode {
     Info,
     Confirming,
     DeleteFailed,
+    Editing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +79,7 @@ pub enum Action {
     OpenWith,
     CancelOverlay,
     TogglePause,
+    EnterEdit,
 }
 
 const PAGE_STEP: isize = 10;
@@ -119,6 +127,8 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::Info) => Action::ShowInfo,
         (Mode::Viewing { .. }, Command::OpenWith) => Action::OpenWith,
         (Mode::Viewing { .. }, Command::Pause) => Action::TogglePause,
+        (Mode::Viewing { .. }, Command::Edit) => Action::EnterEdit,
+        (Mode::Editing, _) => Action::None,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
         (Mode::Confirming, Command::Enter) => Action::DoDelete,
@@ -136,6 +146,7 @@ Enter — window or fullscreen
 Delete — delete the file
 I — file information
 O — open with another app
+E — edit a JPEG
 Space — pause or play a video
 Escape — cancel, leave fullscreen, or quit
 F1 — help
@@ -217,6 +228,46 @@ enum Prompt {
     Failed(String),
 }
 
+/// Two presses on the same slider within this reset it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+struct Editing {
+    loaded: Arc<crate::edit::LoadedSession>,
+    worker: EditWorker,
+    histogram: [Vec<u32>; 3],
+    /// The newest render asked of the worker, and the newest one on screen.
+    requested: u64,
+    shown: u64,
+    fit_pending: bool,
+    current: Adjustments,
+    saved: Adjustments,
+    guide: Guide,
+    split: f32,
+    scrubbing: bool,
+    holding: Option<ImageControls>,
+    confirm_exit: bool,
+    copy_name: Option<String>,
+    replace_copy: bool,
+    notice: Option<String>,
+    saved_once: bool,
+    saving: bool,
+    pointer: Option<EditPointer>,
+    last_slider_press: Option<(Slider, Instant)>,
+}
+
+#[derive(Clone, Copy)]
+enum EditPointer {
+    Divider,
+    /// Drags move the value from `start_value` by the pointer's travel.
+    Slider {
+        slider: Slider,
+        start_x: f32,
+        start_value: f32,
+    },
+    FrameMove { x: f32, y: f32, grab_x: f32, grab_y: f32 },
+    Compare,
+}
+
 pub struct App {
     catalog: Catalog,
     proxy: EventLoopProxy<UserEvent>,
@@ -248,6 +299,7 @@ pub struct App {
     seeking: bool,
     folder_dirty_until: Option<Instant>,
     _watcher: Option<RecommendedWatcher>,
+    editing: Option<Editing>,
     pub fatal: Option<String>,
 }
 
@@ -281,6 +333,7 @@ impl App {
             seeking: false,
             folder_dirty_until: None,
             _watcher: None,
+            editing: None,
             fatal: None,
         }
     }
@@ -310,6 +363,9 @@ impl App {
             .as_ref()
             .and_then(|window| window.fullscreen())
             .is_some();
+        if self.editing.is_some() {
+            return Mode::Editing;
+        }
         match &self.prompt {
             Some(Prompt::Help) => Mode::Help,
             Some(Prompt::Info) => Mode::Info,
@@ -354,6 +410,7 @@ impl App {
                 self.request_redraw();
             }
             Action::TogglePause => self.toggle_video_pause(),
+            Action::EnterEdit => self.begin_edit(),
         }
     }
 
@@ -576,6 +633,16 @@ impl App {
     }
 
     fn apply_folder_changes(&mut self, event_loop: &ActiveEventLoop) {
+        if self.editing.is_some() && !self.catalog.is_empty() {
+            let path = self.catalog.current_path();
+            let _ = self.catalog.refresh();
+            if let Some(stamp) = read_stamp(&path) {
+                self.stamps.insert(path, stamp);
+            }
+            self.refresh_title();
+            self.request_redraw();
+            return;
+        }
         let old_current = if self.catalog.is_empty() {
             None
         } else {
@@ -699,7 +766,585 @@ impl App {
     }
 
     fn image_shown(&self) -> bool {
-        self.displayed.is_some()
+        self.displayed.is_some() || self.editing.is_some()
+    }
+
+    fn begin_edit(&mut self) {
+        if self.catalog.is_empty() || self.editing.is_some() {
+            return;
+        }
+        let path = self.catalog.current_path();
+        if !is_jpeg(&path) {
+            return;
+        }
+        if let Some(decoder) = &self.decoder {
+            decoder.request_edit(path);
+        }
+    }
+
+    fn accept_baseline(&mut self, path: PathBuf, baseline: crate::decode::EditBaseline) {
+        if self.catalog.is_empty() || self.catalog.current_path() != path {
+            return;
+        }
+        let saved = baseline.loaded.adjustments.clone();
+        let current = saved.clone();
+        let max_edge = self
+            .gpu
+            .as_ref()
+            .map(|gpu| gpu.max_edge())
+            .unwrap_or(8192)
+            .min(8192);
+        let loaded = Arc::new(baseline.loaded);
+        let proxy = self.proxy.clone();
+        let worker = EditWorker::start(loaded.clone(), baseline.drag, max_edge, move |event| {
+            let _ = proxy.send_event(UserEvent::Edit(event));
+        });
+        self.editing = Some(Editing {
+            loaded,
+            worker,
+            histogram: Default::default(),
+            requested: 0,
+            shown: 0,
+            fit_pending: true,
+            current,
+            saved,
+            guide: Guide::None,
+            split: 0.25,
+            scrubbing: false,
+            holding: None,
+            confirm_exit: false,
+            copy_name: None,
+            replace_copy: false,
+            notice: None,
+            saved_once: false,
+            saving: false,
+            pointer: None,
+            last_slider_press: None,
+        });
+        self.prompt = None;
+        self.request_edit_render();
+    }
+
+    /// Queues a run of the controls on screen. The worker answers with the
+    /// drag-size picture first and, unless a drag is in progress, the
+    /// full-size one after it.
+    fn request_edit_render(&mut self) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.requested += 1;
+        let adjustments = shown_adjustments(editing);
+        editing
+            .worker
+            .render(editing.requested, &adjustments, !editing.scrubbing);
+    }
+
+    fn show_edit_render(&mut self, rendered: Rendered) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        // A preview may replace anything older. A full-size picture is shown
+        // only while it is still the newest request.
+        let fresh = if rendered.full {
+            rendered.generation == editing.requested && rendered.generation >= editing.shown
+        } else {
+            rendered.generation > editing.shown
+        };
+        if !fresh {
+            return;
+        }
+        editing.shown = rendered.generation;
+        editing.histogram = rendered.histogram;
+        let fit = std::mem::take(&mut editing.fit_pending);
+        let decoded = DecodedImage {
+            width: rendered.width,
+            height: rendered.height,
+            rgba: rendered.rgba,
+        };
+        let new_size = Vec2::new(decoded.width as f32, decoded.height as f32);
+        if fit || self.view.fitted {
+            self.view.fit(new_size, self.picture_window());
+        } else if let Some(old) = self.shown_size {
+            // Keep the on-screen size when the preview and the full-size
+            // picture swap.
+            if old.x > 1.0 && (old.x - new_size.x).abs() > 0.5 {
+                self.view.scale *= old.x / new_size.x;
+            }
+        }
+        if let Some(gpu) = &mut self.gpu {
+            if let Err(err) = gpu.replace_pixels(&decoded) {
+                self.decode_error = Some(err);
+                return;
+            }
+        }
+        self.shown_size = Some(new_size);
+        if !self.catalog.is_empty() {
+            self.displayed = Some(self.catalog.current_path());
+        }
+        self.decode_error = None;
+        self.request_redraw();
+    }
+
+    fn finish_edit_save(&mut self, saved: Saved) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.saving = false;
+        editing.notice = Some(match (&saved.target, saved.result) {
+            (SaveTarget::Over, Ok(())) => {
+                editing.saved = saved.adjustments;
+                editing.saved_once = true;
+                "Saved.".into()
+            }
+            (SaveTarget::Copy(name), Ok(())) => format!("Saved {name}."),
+            (_, Err(err)) => err,
+        });
+        if !self.catalog.is_empty() {
+            let path = self.catalog.current_path();
+            if let Some(stamp) = read_stamp(&path) {
+                self.stamps.insert(path, stamp);
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn picture_window(&self) -> Vec2 {
+        let split = self.editing.as_ref().map(|editing| editing.split).unwrap_or(0.0);
+        let width = self.window_size.x * (1.0 - split.clamp(0.0, 0.5));
+        Vec2::new(width.max(1.0), self.window_size.y.max(1.0))
+    }
+
+    fn edit_panel(&self) -> Option<crate::edit::Panel> {
+        let editing = self.editing.as_ref()?;
+        Some(layout(
+            self.window_size.x,
+            self.window_size.y,
+            self.scale_factor(),
+            editing.split,
+            &editing.current,
+            editing.guide,
+            editing.confirm_exit,
+            editing.copy_name.as_deref(),
+            editing.notice.as_deref(),
+        ))
+    }
+
+    fn edit_quads(&self) -> Vec<ExtraQuad> {
+        let Some(editing) = self.editing.as_ref() else {
+            return Vec::new();
+        };
+        let Some(panel) = self.edit_panel() else {
+            return Vec::new();
+        };
+        let mut quads = Vec::new();
+        let mut quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]| {
+            quads.push(ExtraQuad { x0, y0, x1, y1, color });
+        };
+        quad(panel.x, 0.0, self.window_size.x, self.window_size.y, [0.08, 0.08, 0.08, 0.94]);
+        quad(panel.x - 1.0, 0.0, panel.x + 1.0, self.window_size.y, [1.0, 1.0, 1.0, 0.35]);
+        for [x0, y0, x1, y1] in &panel.buttons {
+            quad(*x0, *y0, *x1, *y1, [1.0, 1.0, 1.0, 0.07]);
+        }
+        let s = panel.scale;
+        let active = match editing.pointer {
+            Some(EditPointer::Slider { slider, .. }) => Some(slider),
+            _ => None,
+        };
+        let accent = [0.36, 0.62, 1.0, 0.95];
+        for track in &panel.tracks {
+            let slider = track.slider;
+            let y = track.y;
+            let x = track.x_of(slider.get(&editing.current));
+            let origin = track.x_of(slider.origin());
+            quad(track.x0, y - s, track.x1, y + s, [1.0, 1.0, 1.0, 0.2]);
+            if slider.origin() > slider.range().0 {
+                quad(origin - 0.5 * s, y - 5.0 * s, origin + 0.5 * s, y + 5.0 * s, [1.0, 1.0, 1.0, 0.45]);
+            }
+            quad(origin.min(x), y - s, origin.max(x), y + s, accent);
+            let knob = if active == Some(slider) { accent } else { [0.92, 0.92, 0.92, 1.0] };
+            quad(x - 3.0 * s, y - 7.0 * s, x + 3.0 * s, y + 7.0 * s, knob);
+        }
+        let hist = &editing.histogram;
+        let [hx0, hy0, hx1, hy1] = panel.histogram;
+        let height = (hy1 - hy0).max(1.0);
+        let slot = (hx1 - hx0) / 256.0;
+        let peak = hist
+            .iter()
+            .filter_map(|channel| channel.iter().max())
+            .max()
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        for (channel, color) in hist.iter().zip([
+            [1.0, 0.25, 0.25, 0.55],
+            [0.25, 1.0, 0.35, 0.55],
+            [0.35, 0.45, 1.0, 0.55],
+        ]) {
+            for (index, count) in channel.iter().enumerate() {
+                let bar = (*count as f32 / peak as f32) * height;
+                if bar < 0.5 {
+                    continue;
+                }
+                let left = hx0 + index as f32 * slot;
+                quad(left, hy1 - bar, left + 0.8 * slot, hy1, color);
+            }
+        }
+        if let Some(size) = self.shown_size {
+            let frame = editing.current.frame;
+            let screen = frame_screen(
+                self.view.pan.x,
+                self.view.pan.y,
+                size.x,
+                size.y,
+                self.view.scale,
+                frame.x,
+                frame.y,
+                frame.w,
+                frame.h,
+            );
+            let photo = [
+                self.view.pan.x,
+                self.view.pan.y,
+                self.view.pan.x + size.x * self.view.scale,
+                self.view.pan.y + size.y * self.view.scale,
+            ];
+            let dim = [0.0, 0.0, 0.0, 0.45];
+            quad(photo[0], photo[1], photo[2], screen[1], dim);
+            quad(photo[0], screen[3], photo[2], photo[3], dim);
+            quad(photo[0], screen[1], screen[0], screen[3], dim);
+            quad(screen[2], screen[1], photo[2], screen[3], dim);
+            let guide = [1.0, 1.0, 1.0, 0.85];
+            match editing.guide {
+                Guide::Thirds => {
+                    for t in [1.0 / 3.0, 2.0 / 3.0] {
+                        let x = screen[0] + (screen[2] - screen[0]) * t;
+                        let y = screen[1] + (screen[3] - screen[1]) * t;
+                        quad(x, screen[1], x + 1.0, screen[3], guide);
+                        quad(screen[0], y, screen[2], y + 1.0, guide);
+                    }
+                }
+                Guide::Center => {
+                    let x = (screen[0] + screen[2]) * 0.5;
+                    let y = (screen[1] + screen[3]) * 0.5;
+                    quad(x, screen[1], x + 1.0, screen[3], guide);
+                    quad(screen[0], y, screen[2], y + 1.0, guide);
+                }
+                Guide::Pointer
+                    if self.cursor_valid
+                        && self.cursor.x >= photo[0]
+                        && self.cursor.x <= photo[2]
+                        && self.cursor.y >= photo[1]
+                        && self.cursor.y <= photo[3] =>
+                {
+                    quad(self.cursor.x, photo[1], self.cursor.x + 1.0, photo[3], guide);
+                    quad(photo[0], self.cursor.y, photo[2], self.cursor.y + 1.0, guide);
+                }
+                Guide::None | Guide::Pointer => {}
+            }
+        }
+        quads
+    }
+
+    fn edit_press(&mut self, hit: EditHit) {
+        let panel = self.edit_panel();
+        let cursor = self.cursor;
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        editing.notice = None;
+        let mut rerun = false;
+        match hit {
+            EditHit::Divider => editing.pointer = Some(EditPointer::Divider),
+            EditHit::Guide => editing.guide = editing.guide.next(),
+            EditHit::MirrorH => {
+                editing.current.mirror_horizontal = !editing.current.mirror_horizontal;
+                rerun = true;
+            }
+            EditHit::MirrorV => {
+                editing.current.mirror_vertical = !editing.current.mirror_vertical;
+                rerun = true;
+            }
+            EditHit::Turn => {
+                editing.current.turn_clockwise(0.0, 0.0);
+                rerun = true;
+            }
+            EditHit::Aspect => {
+                let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
+                editing.current.cycle_aspect(width, height);
+                rerun = true;
+            }
+            EditHit::Slider(slider) => {
+                let now = Instant::now();
+                let double = matches!(
+                    editing.last_slider_press,
+                    Some((last, at)) if last == slider && now.duration_since(at) < DOUBLE_CLICK
+                );
+                let before = slider.get(&editing.current);
+                if double {
+                    // Double-click puts the slider back to its default.
+                    let default = if slider == Slider::Quality {
+                        editing.loaded.estimated_quality as f32
+                    } else {
+                        slider.origin()
+                    };
+                    apply_slider(editing, slider, default);
+                    editing.last_slider_press = None;
+                } else {
+                    // A press on the track jumps there. A press on the label
+                    // only grabs, and the drag moves the value from where it is.
+                    let track = panel.as_ref().and_then(|panel| panel.track(slider));
+                    if let Some(track) = track.filter(|track| cursor.x >= track.x0 - 4.0) {
+                        apply_slider(editing, slider, slider.snap(track.value_at(cursor.x)));
+                    }
+                    editing.pointer = Some(EditPointer::Slider {
+                        slider,
+                        start_x: cursor.x,
+                        start_value: slider.get(&editing.current),
+                    });
+                    editing.last_slider_press = Some((slider, now));
+                }
+                let changed = slider.get(&editing.current) != before;
+                if changed && slider != Slider::Quality {
+                    // A held button is finished by the release. A double-click
+                    // has no drag after it, so it asks for the full size now.
+                    editing.scrubbing = !double;
+                    rerun = true;
+                }
+            }
+            EditHit::Compare(which) => {
+                if matches!(which, ImageControls::Saved | ImageControls::SavedFramed)
+                    && !editing.loaded.had_adj
+                    && !editing.saved_once
+                {
+                    return;
+                }
+                editing.holding = Some(which);
+                editing.pointer = Some(EditPointer::Compare);
+                rerun = true;
+            }
+            EditHit::Save => {}
+            EditHit::SaveCopy => {
+                if !editing.saving {
+                    editing.copy_name = Some(copy_stem(&editing.loaded.paths.open));
+                    editing.replace_copy = false;
+                }
+            }
+            EditHit::Exit => {
+                if editing.saving {
+                    editing.notice = Some("Saving. Exit when it is done.".into());
+                } else {
+                    editing.confirm_exit = editing.current != editing.saved;
+                    if !editing.confirm_exit {
+                        self.leave_edit();
+                        return;
+                    }
+                }
+            }
+            EditHit::ConfirmYes => {
+                self.leave_edit();
+                return;
+            }
+            EditHit::ConfirmNo => editing.confirm_exit = false,
+        }
+        if matches!(hit, EditHit::Save) {
+            self.save_edit(false);
+            return;
+        }
+        if rerun {
+            self.request_edit_render();
+        }
+        self.request_redraw();
+    }
+
+    fn edit_drag(&mut self, cursor: Vec2) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        let pointer = editing.pointer;
+        match pointer {
+            Some(EditPointer::Divider) => {
+                let split = (1.0 - cursor.x / self.window_size.x.max(1.0)).clamp(0.18, 0.5);
+                if let Some(editing) = &mut self.editing {
+                    editing.split = split;
+                }
+                self.request_redraw();
+            }
+            Some(EditPointer::Slider {
+                slider,
+                start_x,
+                start_value,
+            }) => {
+                let Some(track) = self.edit_panel().and_then(|panel| panel.track(slider)) else {
+                    return;
+                };
+                let value = slider.snap(start_value + track.delta(cursor.x - start_x));
+                let Some(editing) = &mut self.editing else {
+                    return;
+                };
+                if slider.get(&editing.current) == value {
+                    return;
+                }
+                apply_slider(editing, slider, value);
+                if slider == Slider::Quality {
+                    self.request_redraw();
+                } else {
+                    editing.scrubbing = true;
+                    self.request_edit_render();
+                }
+            }
+            Some(EditPointer::FrameMove { x, y, grab_x, grab_y }) => {
+                let Some(size) = self.shown_size else {
+                    return;
+                };
+                let dx = (cursor.x - grab_x) / (size.x * self.view.scale).max(1.0);
+                let dy = (cursor.y - grab_y) / (size.y * self.view.scale).max(1.0);
+                if let Some(editing) = &mut self.editing {
+                    let w = editing.current.frame.w;
+                    let h = editing.current.frame.h;
+                    editing.current.frame.x = (x + dx).clamp(0.0, 1.0 - w);
+                    editing.current.frame.y = (y + dy).clamp(0.0, 1.0 - h);
+                }
+                // The frame is drawn over the picture. The pixels and the
+                // histogram catch up on release.
+                self.request_redraw();
+            }
+            Some(EditPointer::Compare) | None => {}
+        }
+    }
+
+    fn edit_release(&mut self) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        let rerun = editing.scrubbing
+            || editing.holding.is_some()
+            || matches!(editing.pointer, Some(EditPointer::FrameMove { .. }));
+        editing.pointer = None;
+        editing.holding = None;
+        editing.scrubbing = false;
+        if rerun {
+            self.request_edit_render();
+        }
+        self.request_redraw();
+    }
+
+    fn save_edit(&mut self, as_copy: bool) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        if editing.saving {
+            return;
+        }
+        let target = if as_copy {
+            let name = editing.copy_name.clone().unwrap_or_else(|| "copy.jpg".into());
+            let path = editing
+                .loaded
+                .paths
+                .open
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&name);
+            if path.exists() && !editing.replace_copy {
+                editing.replace_copy = true;
+                editing.notice = Some("That name exists. Enter again to replace it.".into());
+                self.request_redraw();
+                return;
+            }
+            SaveTarget::Copy(name)
+        } else {
+            SaveTarget::Over
+        };
+        editing.worker.save(target, &editing.current);
+        editing.saving = true;
+        editing.copy_name = None;
+        editing.replace_copy = false;
+        editing.confirm_exit = false;
+        editing.notice = Some("Saving…".into());
+        self.request_redraw();
+    }
+
+    fn leave_edit(&mut self) {
+        self.editing = None;
+        if self.catalog.is_empty() {
+            return;
+        }
+        let path = self.catalog.current_path();
+        self.cache.remove(&path);
+        self.displayed = None;
+        self.shown_size = None;
+        self.stamps.remove(&path);
+        self.sync_images();
+        self.request_redraw();
+    }
+
+    fn type_copy_name(&mut self, key: &Key) -> bool {
+        let editing = self.editing.as_ref();
+        if editing.is_none_or(|editing| editing.copy_name.is_none()) {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                if let Some(editing) = &mut self.editing {
+                    editing.copy_name = None;
+                    editing.replace_copy = false;
+                    editing.notice = None;
+                }
+            }
+            Key::Named(NamedKey::Enter) => self.save_edit(true),
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(editing) = &mut self.editing {
+                    if let Some(name) = &mut editing.copy_name {
+                        name.pop();
+                    }
+                }
+            }
+            Key::Character(ch) => {
+                if let Some(editing) = &mut self.editing {
+                    if let Some(name) = &mut editing.copy_name {
+                        if !ch.chars().any(|c| c.is_control()) && name.len() < 120 {
+                            name.push_str(ch);
+                        }
+                    }
+                }
+            }
+            _ => return false,
+        }
+        self.request_redraw();
+        true
+    }
+
+    fn press_on_frame(&mut self) -> bool {
+        let Some(editing) = self.editing.as_ref() else {
+            return false;
+        };
+        let Some(size) = self.shown_size else {
+            return false;
+        };
+        let screen = frame_screen(
+            self.view.pan.x,
+            self.view.pan.y,
+            size.x,
+            size.y,
+            self.view.scale,
+            editing.current.frame.x,
+            editing.current.frame.y,
+            editing.current.frame.w,
+            editing.current.frame.h,
+        );
+        if self.cursor.x < screen[0] || self.cursor.x > screen[2] || self.cursor.y < screen[1] || self.cursor.y > screen[3]
+        {
+            return false;
+        }
+        let frame = editing.current.frame;
+        if let Some(editing) = &mut self.editing {
+            editing.pointer = Some(EditPointer::FrameMove {
+                x: frame.x,
+                y: frame.y,
+                grab_x: self.cursor.x,
+                grab_y: self.cursor.y,
+            });
+        }
+        true
     }
 
     fn cursor_or_center(&self) -> Vec2 {
@@ -1031,9 +1676,20 @@ impl ApplicationHandler<UserEvent> for App {
                         self.cache.insert(path, CacheEntry::Failed(err));
                     }
                 }
-                self.apply_current();
-                self.request_redraw();
+                if self.editing.is_none() {
+                    self.apply_current();
+                    self.request_redraw();
+                }
             }
+            UserEvent::BaselineReady { path, result } => match result {
+                Ok(baseline) => self.accept_baseline(path, baseline),
+                Err(err) => {
+                    self.decode_error = Some(err);
+                    self.request_redraw();
+                }
+            },
+            UserEvent::Edit(WorkerEvent::Rendered(rendered)) => self.show_edit_render(rendered),
+            UserEvent::Edit(WorkerEvent::Saved(saved)) => self.finish_edit_save(saved),
             UserEvent::VideoFrame { generation } => {
                 let image = {
                     let Some(video) = &self.video else {
@@ -1089,6 +1745,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.type_copy_name(&event.logical_key) {
+                    return;
+                }
                 if let Some(command) = command_from(&event.logical_key) {
                     self.on_command(event_loop, command, event.repeat);
                 }
@@ -1109,11 +1768,16 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(image) = self.image_size() else {
                     return;
                 };
+                let window = if self.editing.is_some() {
+                    self.picture_window()
+                } else {
+                    self.window_size
+                };
                 self.view.zoom_at(
                     self.cursor_or_center(),
                     1.1_f32.powf(steps),
                     image,
-                    self.window_size,
+                    window,
                 );
                 self.request_redraw();
             }
@@ -1126,7 +1790,23 @@ impl ApplicationHandler<UserEvent> for App {
                 if state != ElementState::Pressed {
                     self.dragging = false;
                     self.seeking = false;
+                    if self.editing.is_some() {
+                        self.edit_release();
+                    }
                     return;
+                }
+                if self.editing.is_some() {
+                    if let Some(panel) = self.edit_panel() {
+                        if let Some(hit) = hit_test(&panel, self.cursor.x, self.cursor.y) {
+                            self.dragging = false;
+                            self.edit_press(hit);
+                            return;
+                        }
+                    }
+                    if self.press_on_frame() {
+                        self.dragging = false;
+                        return;
+                    }
                 }
                 match self.transport_hit() {
                     Some(Hit::Button) => {
@@ -1156,6 +1836,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.note_pointer_motion();
                 self.poke_transport();
                 let next = Vec2::new(position.x as f32, position.y as f32);
+                if self.editing.as_ref().is_some_and(|editing| editing.pointer.is_some()) {
+                    self.cursor = next;
+                    self.cursor_valid = true;
+                    self.edit_drag(next);
+                    return;
+                }
                 if self.seeking {
                     self.seek_video_at(next.x);
                 } else if self.dragging && self.cursor_valid && self.image_shown() {
@@ -1178,16 +1864,22 @@ impl ApplicationHandler<UserEvent> for App {
                     transport::format_clock_range(position, duration)
                 });
                 let transport = self.transport_draw(label.as_deref());
+                let quads = self.edit_quads();
+                let panel = self.edit_panel();
                 let frame = Frame {
                     image_width,
                     image_height,
                     scale: self.view.scale,
                     pan_x: self.view.pan.x,
                     pan_y: self.view.pan.y,
-                    dim: self.prompt.is_some(),
-                    text: text.as_deref(),
-                    transport,
+                    dim: self.prompt.is_some() && self.editing.is_none(),
+                    text: if self.editing.is_some() { None } else { text.as_deref() },
+                    transport: if self.editing.is_some() { None } else { transport },
                     scale_factor,
+                    extra: &quads,
+                    panel_text: panel.as_ref().map(|panel| panel.text.as_str()),
+                    panel_left: panel.as_ref().map(|panel| panel.x + 8.0).unwrap_or(0.0),
+                    panel_top: panel.as_ref().map(|panel| panel.text_top).unwrap_or(0.0),
                 };
                 let Some(gpu) = &mut self.gpu else {
                     return;
@@ -1199,6 +1891,68 @@ impl ApplicationHandler<UserEvent> for App {
             _ => {}
         }
     }
+}
+
+fn shown_adjustments(editing: &Editing) -> Adjustments {
+    let Some(hold) = editing.holding else {
+        return editing.current.clone();
+    };
+    match hold {
+        ImageControls::Current => editing.current.clone(),
+        ImageControls::Original => Adjustments::defaults(editing.current.jpeg_quality),
+        ImageControls::OriginalFramed => {
+            let mut adjustments = Adjustments::defaults(editing.current.jpeg_quality);
+            copy_geometry(&mut adjustments, &editing.current);
+            adjustments
+        }
+        ImageControls::Saved => editing.saved.clone(),
+        ImageControls::SavedFramed => {
+            let mut adjustments = editing.saved.clone();
+            copy_geometry(&mut adjustments, &editing.current);
+            adjustments
+        }
+    }
+}
+
+fn copy_geometry(tone: &mut Adjustments, geometry: &Adjustments) {
+    tone.quarter_turns = geometry.quarter_turns;
+    tone.mirror_horizontal = geometry.mirror_horizontal;
+    tone.mirror_vertical = geometry.mirror_vertical;
+    tone.rotation = geometry.rotation;
+    tone.aspect = geometry.aspect;
+    tone.frame = geometry.frame;
+}
+
+fn oriented_extent(image: &LinearImage, adjustments: &Adjustments) -> (f32, f32) {
+    if adjustments.quarter_turns % 2 == 1 {
+        (image.height as f32, image.width as f32)
+    } else {
+        (image.width as f32, image.height as f32)
+    }
+}
+
+/// Sets a slider. Rotation also pulls the frame back inside the rotated photo.
+fn apply_slider(editing: &mut Editing, slider: Slider, value: f32) {
+    slider.set(&mut editing.current, value);
+    if slider == Slider::Rotation {
+        let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
+        let current = &editing.current;
+        editing.current.frame =
+            clamp_frame_to_photo(current.frame, current.aspect, current.rotation, width, height);
+    }
+}
+
+fn is_jpeg(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg"))
+}
+
+fn copy_stem(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "photo".into());
+    format!("{stem}_copy.jpg")
 }
 
 fn command_from(key: &Key) -> Option<Command> {
@@ -1215,6 +1969,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::F1) => Some(Command::Help),
         Key::Character(ch) if ch.eq_ignore_ascii_case("i") => Some(Command::Info),
         Key::Character(ch) if ch.eq_ignore_ascii_case("o") => Some(Command::OpenWith),
+        Key::Character(ch) if ch.eq_ignore_ascii_case("e") => Some(Command::Edit),
         Key::Named(NamedKey::Space) => Some(Command::Pause),
         _ => None,
     }
@@ -1457,6 +2212,16 @@ mod tests {
             Action::None
         );
         assert_eq!(action_for(Command::Left, viewing, false), Action::Previous);
+        assert_eq!(
+            action_for(Command::Edit, viewing, false),
+            Action::EnterEdit
+        );
+        assert_eq!(action_for(Command::Edit, viewing, true), Action::None);
+        assert_eq!(action_for(Command::Escape, Mode::Editing, false), Action::None);
+        assert_eq!(action_for(Command::Left, Mode::Editing, false), Action::None);
+        assert_eq!(action_for(Command::Enter, Mode::Editing, false), Action::None);
+        assert_eq!(action_for(Command::Delete, Mode::Editing, false), Action::None);
+        assert_eq!(action_for(Command::Edit, Mode::Editing, false), Action::None);
     }
 
     #[test]

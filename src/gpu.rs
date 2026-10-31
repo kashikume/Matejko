@@ -57,6 +57,14 @@ pub struct TransportDraw<'a> {
     pub label: &'a str,
 }
 
+pub struct ExtraQuad {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub color: [f32; 4],
+}
+
 pub struct Frame<'a> {
     pub image_width: f32,
     pub image_height: f32,
@@ -67,6 +75,10 @@ pub struct Frame<'a> {
     pub text: Option<&'a str>,
     pub transport: Option<TransportDraw<'a>>,
     pub scale_factor: f32,
+    pub extra: &'a [ExtraQuad],
+    pub panel_text: Option<&'a str>,
+    pub panel_left: f32,
+    pub panel_top: f32,
 }
 
 pub struct Gpu {
@@ -103,6 +115,7 @@ struct TextLayer {
     laid_out: String,
     laid_out_width: u32,
     laid_out_scale: f32,
+    laid_out_left: f32,
     bar_buffer: Buffer,
     bar_laid_out: String,
     bar_laid_out_width: u32,
@@ -232,7 +245,7 @@ impl Gpu {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertices"),
-            size: (std::mem::size_of::<Vertex>() * 64) as u64,
+            size: (std::mem::size_of::<Vertex>() * 8192) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -417,7 +430,23 @@ impl Gpu {
         if let Some(transport) = &frame.transport {
             push_transport(&mut vertices, transport, width, height);
         }
+        for quad in frame.extra {
+            push_quad(
+                &mut vertices,
+                quad.x0,
+                quad.y0,
+                quad.x1,
+                quad.y1,
+                width,
+                height,
+                quad.color,
+                false,
+            );
+        }
         let chrome_count = vertices.len() as u32 - chrome_start;
+        if vertices.len() > 8192 {
+            vertices.truncate(8192 / 6 * 6);
+        }
         if !vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
@@ -428,6 +457,9 @@ impl Gpu {
             &self.queue,
             frame.text,
             frame.transport,
+            frame.panel_text,
+            frame.panel_left,
+            frame.panel_top,
             self.config.width,
             self.config.height,
             frame.scale_factor,
@@ -504,6 +536,7 @@ impl TextLayer {
             laid_out: String::new(),
             laid_out_width: 0,
             laid_out_scale: 0.0,
+            laid_out_left: 0.0,
             bar_buffer,
             bar_laid_out: String::new(),
             bar_laid_out_width: 0,
@@ -518,31 +551,45 @@ impl TextLayer {
         queue: &wgpu::Queue,
         text: Option<&str>,
         transport: Option<TransportDraw<'_>>,
+        panel_text: Option<&str>,
+        panel_left: f32,
+        panel_top: f32,
         width: u32,
         height: u32,
         scale_factor: f32,
     ) -> bool {
         let scale = scale_factor.max(1.0);
-        let overlay = text.unwrap_or("");
-        if text.is_some()
+        let overlay = if text.is_some() {
+            text.unwrap_or("")
+        } else {
+            panel_text.unwrap_or("")
+        };
+        let show_block = text.is_some() || panel_text.is_some();
+        let block_left = if text.is_some() { 0.0 } else { panel_left };
+        if show_block
             && (overlay != self.laid_out
                 || width != self.laid_out_width
-                || (scale - self.laid_out_scale).abs() > 0.01)
+                || (scale - self.laid_out_scale).abs() > 0.01
+                || (block_left - self.laid_out_left).abs() > 0.5)
         {
+            let size = if text.is_some() { 20.0 } else { 15.0 };
+            let line = if text.is_some() { 28.0 } else { 22.0 };
             self.buffer.set_wrap(Wrap::Glyph);
             self.buffer.set_metrics_and_size(
-                Metrics::new(20.0 * scale, 28.0 * scale),
-                Some(width as f32),
+                Metrics::new(size * scale, line * scale),
+                Some((width as f32) - block_left),
                 None,
             );
             let attrs = Attrs::new().family(Family::SansSerif);
+            let align = if text.is_some() { Align::Center } else { Align::Left };
             self.buffer
-                .set_text(overlay, &attrs, Shaping::Advanced, Some(Align::Center));
+                .set_text(overlay, &attrs, Shaping::Advanced, Some(align));
             self.buffer.shape_until_scroll(&mut self.font_system, false);
             self.laid_out = overlay.to_string();
             self.laid_out_width = width;
             self.laid_out_scale = scale;
-        } else if text.is_some() {
+            self.laid_out_left = block_left;
+        } else if show_block {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
@@ -578,7 +625,7 @@ impl TextLayer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        if text.is_none() && !has_bar {
+        if text.is_none() && panel_text.is_none() && !has_bar {
             return false;
         }
 
@@ -592,7 +639,9 @@ impl TextLayer {
                 max_y = max_y.max(run.line_y + run.line_height);
             }
         }
-        let top = if any {
+        let top = if panel_text.is_some() && text.is_none() {
+            panel_top
+        } else if any {
             ((height as f32) - (max_y - min_y)) / 2.0 - min_y
         } else {
             0.0
@@ -606,10 +655,10 @@ impl TextLayer {
             bottom: height as i32,
         };
         let mut areas = Vec::new();
-        if text.is_some() {
+        if text.is_some() || panel_text.is_some() {
             areas.push(TextArea {
                 buffer: &self.buffer,
-                left: 0.0,
+                left: if text.is_some() { 0.0 } else { panel_left },
                 top,
                 scale: 1.0,
                 bounds,

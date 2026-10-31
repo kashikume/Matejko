@@ -3,6 +3,7 @@
 mod app;
 mod catalog;
 mod decode;
+mod edit;
 mod gpu;
 mod info;
 mod playback;

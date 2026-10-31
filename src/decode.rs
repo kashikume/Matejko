@@ -19,6 +19,13 @@ pub enum UserEvent {
         path: PathBuf,
         result: Result<DecodedImage, String>,
     },
+    /// The JPEG baseline for edit mode, decoded on this thread.
+    BaselineReady {
+        path: PathBuf,
+        result: Result<EditBaseline, String>,
+    },
+    /// A render or a save finished on the edit worker.
+    Edit(crate::edit::WorkerEvent),
     /// The watched folder changed. The app debounces before rescanning.
     FolderDirty,
     /// A new video frame is waiting in the player. `generation` identifies the
@@ -35,8 +42,19 @@ pub enum UserEvent {
     },
 }
 
+enum Job {
+    View(PathBuf),
+    Edit(PathBuf),
+}
+
+pub struct EditBaseline {
+    pub loaded: crate::edit::LoadedSession,
+    pub drag: crate::edit::Image,
+}
+
 struct Jobs {
     queue: Mutex<std::collections::VecDeque<PathBuf>>,
+    edit: Mutex<Option<PathBuf>>,
     ready: Condvar,
 }
 
@@ -44,6 +62,7 @@ impl Jobs {
     fn new() -> Self {
         Self {
             queue: Mutex::new(std::collections::VecDeque::new()),
+            edit: Mutex::new(None),
             ready: Condvar::new(),
         }
     }
@@ -67,11 +86,19 @@ impl Jobs {
         }
     }
 
-    fn pop(&self) -> PathBuf {
+    fn request_edit(&self, path: PathBuf) {
+        *self.edit.lock().expect("edit queue") = Some(path);
+        self.ready.notify_one();
+    }
+
+    fn pop(&self) -> Job {
         let mut queue = self.queue.lock().expect("decode queue");
         loop {
+            if let Some(path) = self.edit.lock().expect("edit queue").take() {
+                return Job::Edit(path);
+            }
             if let Some(path) = queue.pop_front() {
-                return path;
+                return Job::View(path);
             }
             queue = self.ready.wait(queue).expect("decode queue");
         }
@@ -90,13 +117,25 @@ impl Decoder {
         let thread = thread::Builder::new()
             .name("matejko-decode".into())
             .spawn(move || loop {
-                let path = thread_jobs.pop();
-                let result = decode_file(&path, max_edge);
-                if proxy
-                    .send_event(UserEvent::Decoded { path, result })
-                    .is_err()
-                {
-                    break;
+                match thread_jobs.pop() {
+                    Job::View(path) => {
+                        let result = decode_file(&path, max_edge);
+                        if proxy
+                            .send_event(UserEvent::Decoded { path, result })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Job::Edit(path) => {
+                        let result = load_edit_baseline(&path);
+                        if proxy
+                            .send_event(UserEvent::BaselineReady { path, result })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             })
             .expect("decode thread");
@@ -113,6 +152,18 @@ impl Decoder {
     pub fn promote(&self, path: &Path) {
         self.jobs.promote(path);
     }
+
+    pub fn request_edit(&self, path: PathBuf) {
+        self.jobs.request_edit(path);
+    }
+}
+
+fn load_edit_baseline(path: &Path) -> Result<EditBaseline, String> {
+    let loaded = crate::edit::load_session(path)?;
+    let drag = loaded
+        .baseline
+        .downsample_long_side(crate::edit::DRAG_LONG_SIDE);
+    Ok(EditBaseline { loaded, drag })
 }
 
 pub fn decode_file(path: &Path, max_edge: u32) -> Result<DecodedImage, String> {
