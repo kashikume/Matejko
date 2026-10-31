@@ -1002,8 +1002,14 @@ impl App {
             let y = mid + offset * s;
             quad(panel.x - 2.0 * s, y - 0.75 * s, panel.x + 2.0 * s, y + 0.75 * s, [0.1, 0.1, 0.1, 0.9]);
         }
-        for [x0, y0, x1, y1] in &panel.buttons {
-            quad(*x0, *y0, *x1, *y1, [1.0, 1.0, 1.0, 0.07]);
+        for button in &panel.buttons {
+            let [x0, y0, x1, y1] = button.rect;
+            let fill = if button.on {
+                [0.36, 0.62, 1.0, 0.4]
+            } else {
+                [1.0, 1.0, 1.0, 0.07]
+            };
+            quad(x0, y0, x1, y1, fill);
         }
         let active = match editing.pointer {
             Some(EditPointer::Slider { slider, .. }) => Some(slider),

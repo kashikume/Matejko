@@ -158,6 +158,15 @@ impl Track {
     }
 }
 
+/// A button's background. Its label is in `Panel::texts`.
+#[derive(Clone, Copy, Debug)]
+pub struct Button {
+    /// x0, y0, x1, y1
+    pub rect: [f32; 4],
+    /// A toggle that is on, such as a mirror.
+    pub on: bool,
+}
+
 /// One of the O / Of / S / Sf buttons. Its label is in `Panel::texts`.
 #[derive(Clone, Copy, Debug)]
 pub struct CompareButton {
@@ -203,8 +212,7 @@ pub struct Panel {
     /// x0, x1, y0, y1
     pub rows: Vec<(Hit, f32, f32, f32, f32)>,
     pub tracks: Vec<Track>,
-    /// Backgrounds for the button rows: x0, y0, x1, y1.
-    pub buttons: Vec<[f32; 4]>,
+    pub buttons: Vec<Button>,
     pub compare: Vec<CompareButton>,
     pub texts: Vec<Text>,
     pub histogram: [f32; 4],
@@ -236,7 +244,7 @@ pub const LINE_HEIGHT: f32 = 22.0;
 struct Builder {
     rows: Vec<(Hit, f32, f32, f32, f32)>,
     tracks: Vec<Track>,
-    buttons: Vec<[f32; 4]>,
+    buttons: Vec<Button>,
     texts: Vec<Text>,
     y: f32,
     row_h: f32,
@@ -269,11 +277,32 @@ impl Builder {
 
     fn button(&mut self, hit: Hit, label: String) {
         let inset = 2.0 * self.scale;
-        self.buttons
-            .push([self.x0, self.y + inset, self.x1, self.y + self.row_h - inset]);
+        self.buttons.push(Button {
+            rect: [self.x0, self.y + inset, self.x1, self.y + self.row_h - inset],
+            on: false,
+        });
         let pad = 8.0 * self.scale;
         self.text(label, self.x0 + pad, self.x1 - pad, Align::Left, Tone::Normal, Some(hit));
         self.row(hit);
+    }
+
+    /// Buttons side by side, sharing the row's width. A toggle that is on
+    /// shows by its colour, not by its label.
+    fn button_row(&mut self, buttons: &[(Hit, &str, bool)]) {
+        let gap = 4.0 * self.scale;
+        let inset = 2.0 * self.scale;
+        let span = (self.x1 - self.x0 + gap) / buttons.len() as f32;
+        for (index, (hit, label, on)) in buttons.iter().enumerate() {
+            let left = self.x0 + span * index as f32;
+            let right = left + span - gap;
+            self.buttons.push(Button {
+                rect: [left, self.y + inset, right, self.y + self.row_h - inset],
+                on: *on,
+            });
+            self.text((*label).into(), left, right, Align::Center, Tone::Normal, Some(*hit));
+            self.rows.push((*hit, left, right, self.y, self.y + self.row_h));
+        }
+        self.y += self.row_h;
     }
 
     /// Title on the left, value right-aligned against the track.
@@ -339,9 +368,11 @@ pub fn layout(
         scale,
     };
     b.button(Hit::Guide, format!("Guide  {}", guide.label()));
-    b.button(Hit::MirrorH, format!("Mirror horizontal  {}", mark(adj.mirror_horizontal)));
-    b.button(Hit::MirrorV, format!("Mirror vertical  {}", mark(adj.mirror_vertical)));
-    b.button(Hit::Turn, "Rotate 90°".into());
+    b.button_row(&[
+        (Hit::MirrorH, "Mirror H", adj.mirror_horizontal),
+        (Hit::MirrorV, "Mirror V", adj.mirror_vertical),
+        (Hit::Turn, "Rotate 90°", false),
+    ]);
     b.heading("Light");
     for slider in [
         Slider::Exposure,
@@ -426,10 +457,6 @@ pub fn layout(
     }
 }
 
-fn mark(on: bool) -> &'static str {
-    if on { "on" } else { "off" }
-}
-
 fn slider_value(slider: Slider, adj: &Adjustments) -> String {
     let value = slider.get(adj);
     let shown = match slider {
@@ -505,6 +532,30 @@ mod tests {
         let heading = panel.texts.iter().find(|text| text.text == "COLOR").unwrap();
         assert!(heading.top > contrast[3] + 5.0);
         assert!(temperature[1] > heading.top + LINE_HEIGHT - 1.0);
+    }
+
+    #[test]
+    fn mirrors_and_the_turn_share_one_row() {
+        let mut adj = Adjustments::defaults(90);
+        adj.mirror_vertical = true;
+        let panel = layout(
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+        );
+        let h = panel.row_rect(Hit::MirrorH).unwrap();
+        let v = panel.row_rect(Hit::MirrorV).unwrap();
+        let turn = panel.row_rect(Hit::Turn).unwrap();
+        assert!(h[1] == v[1] && v[1] == turn[1], "not one row");
+        assert!(h[2] < v[0] && v[2] < turn[0], "buttons overlap");
+        // The label names the button. The colour says whether it is on.
+        assert!(panel.texts.iter().any(|text| text.text == "Mirror V"));
+        assert!(!panel.texts.iter().any(|text| text.text.contains(" on")));
+        let on: Vec<bool> = panel
+            .buttons
+            .iter()
+            .filter(|button| button.rect[1] > h[1] && button.rect[3] < h[3])
+            .map(|button| button.on)
+            .collect();
+        assert_eq!(on, [false, true, false]);
     }
 
     #[test]
