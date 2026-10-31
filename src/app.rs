@@ -16,15 +16,16 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::windows::{MonitorHandleExtWindows, WindowAttributesExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{Fullscreen, Icon, Window};
+use winit::window::{CursorIcon, Fullscreen, Icon, Window};
 
 use crate::catalog::{is_video, Catalog, Refresh};
 use crate::decode::{DecodedImage, Decoder, UserEvent};
 use crate::edit::{
-    clamp_frame_to_photo, frame_screen, hit_test, layout, Adjustments, EditWorker, Guide,
-    Hit as EditHit, Image as LinearImage, ImageControls, Rendered, SaveTarget, Saved, Slider,
-    WorkerEvent,
+    clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, EditWorker,
+    Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
+    Rendered, SaveTarget, Saved, Slider, WorkerEvent,
 };
+use crate::gpu::Label;
 use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
 use crate::info::format_image_info;
 use crate::playback::VideoSession;
@@ -239,6 +240,11 @@ struct Editing {
     requested: u64,
     shown: u64,
     fit_pending: bool,
+    /// Where the usable rectangle sits in the picture on screen, as
+    /// fractions: left, top, width, height. From the newest render.
+    usable: [f32; 4],
+    /// `Rendered::photo_long` of the picture on screen, or 0 before the first.
+    photo_long: f32,
     current: Adjustments,
     saved: Adjustments,
     guide: Guide,
@@ -264,7 +270,12 @@ enum EditPointer {
         start_x: f32,
         start_value: f32,
     },
-    FrameMove { x: f32, y: f32, grab_x: f32, grab_y: f32 },
+    Frame {
+        handle: Handle,
+        start: EditFrame,
+        grab_x: f32,
+        grab_y: f32,
+    },
     Compare,
 }
 
@@ -300,6 +311,8 @@ pub struct App {
     folder_dirty_until: Option<Instant>,
     _watcher: Option<RecommendedWatcher>,
     editing: Option<Editing>,
+    shift_down: bool,
+    cursor_icon: CursorIcon,
     pub fatal: Option<String>,
 }
 
@@ -334,6 +347,8 @@ impl App {
             folder_dirty_until: None,
             _watcher: None,
             editing: None,
+            shift_down: false,
+            cursor_icon: CursorIcon::Default,
             fatal: None,
         }
     }
@@ -806,6 +821,8 @@ impl App {
             requested: 0,
             shown: 0,
             fit_pending: true,
+            usable: [0.0, 0.0, 1.0, 1.0],
+            photo_long: 0.0,
             current,
             saved,
             guide: Guide::None,
@@ -855,6 +872,8 @@ impl App {
         }
         editing.shown = rendered.generation;
         editing.histogram = rendered.histogram;
+        editing.usable = rendered.usable;
+        let old_photo_long = std::mem::replace(&mut editing.photo_long, rendered.photo_long);
         let fit = std::mem::take(&mut editing.fit_pending);
         let decoded = DecodedImage {
             width: rendered.width,
@@ -865,10 +884,17 @@ impl App {
         if fit || self.view.fitted {
             self.view.fit(new_size, self.picture_window());
         } else if let Some(old) = self.shown_size {
-            // Keep the on-screen size when the preview and the full-size
-            // picture swap.
-            if old.x > 1.0 && (old.x - new_size.x).abs() > 0.5 {
-                self.view.scale *= old.x / new_size.x;
+            // Keep the photo where it was on screen: same size, same centre.
+            // The picture's resolution changes between the preview and the
+            // full size, and its box grows with the rotation.
+            if old_photo_long > 0.0 {
+                let centre_x = self.view.pan.x + old.x * 0.5 * self.view.scale;
+                let centre_y = self.view.pan.y + old.y * 0.5 * self.view.scale;
+                self.view.scale *= old_photo_long / rendered.photo_long.max(1.0);
+                self.view.pan = Vec2::new(
+                    centre_x - new_size.x * 0.5 * self.view.scale,
+                    centre_y - new_size.y * 0.5 * self.view.scale,
+                );
             }
         }
         if let Some(gpu) = &mut self.gpu {
@@ -923,6 +949,8 @@ impl App {
             editing.split,
             &editing.current,
             editing.guide,
+            editing.loaded.had_adj || editing.saved_once,
+            editing.holding,
             editing.confirm_exit,
             editing.copy_name.as_deref(),
             editing.notice.as_deref(),
@@ -989,30 +1017,30 @@ impl App {
                 quad(left, hy1 - bar, left + 0.8 * slot, hy1, color);
             }
         }
-        if let Some(size) = self.shown_size {
-            let frame = editing.current.frame;
-            let screen = frame_screen(
-                self.view.pan.x,
-                self.view.pan.y,
-                size.x,
-                size.y,
-                self.view.scale,
-                frame.x,
-                frame.y,
-                frame.w,
-                frame.h,
-            );
-            let photo = [
-                self.view.pan.x,
-                self.view.pan.y,
-                self.view.pan.x + size.x * self.view.scale,
-                self.view.pan.y + size.y * self.view.scale,
-            ];
-            let dim = [0.0, 0.0, 0.0, 0.45];
+        for button in &panel.compare {
+            let [x0, y0, x1, y1] = button.rect;
+            let fill = if button.held {
+                [0.36, 0.62, 1.0, 0.45]
+            } else if button.enabled {
+                [1.0, 1.0, 1.0, 0.07]
+            } else {
+                [1.0, 1.0, 1.0, 0.025]
+            };
+            quad(x0, y0, x1, y1, fill);
+        }
+        if let Some((photo, _, screen)) = self.edit_rects() {
+            // The margin outside the frame is dimmed, and so are the empty
+            // corners the rotation left, which always lie outside it.
+            let dim = [0.0, 0.0, 0.0, 0.55];
             quad(photo[0], photo[1], photo[2], screen[1], dim);
             quad(photo[0], screen[3], photo[2], photo[3], dim);
             quad(photo[0], screen[1], screen[0], screen[3], dim);
             quad(screen[2], screen[1], photo[2], screen[3], dim);
+            let edge = [1.0, 1.0, 1.0, 0.6];
+            quad(screen[0], screen[1], screen[2], screen[1] + 1.0, edge);
+            quad(screen[0], screen[3] - 1.0, screen[2], screen[3], edge);
+            quad(screen[0], screen[1], screen[0] + 1.0, screen[3], edge);
+            quad(screen[2] - 1.0, screen[1], screen[2], screen[3], edge);
             let guide = [1.0, 1.0, 1.0, 0.85];
             match editing.guide {
                 Guide::Thirds => {
@@ -1066,6 +1094,17 @@ impl App {
             }
             EditHit::Turn => {
                 editing.current.turn_clockwise(0.0, 0.0);
+                // The usable rectangle turned with the photo. A locked ratio
+                // is refitted in pixels of the new one.
+                let (width, height) = oriented_extent(&editing.loaded.baseline, &editing.current);
+                let current = &editing.current;
+                editing.current.frame = clamp_frame_to_photo(
+                    current.frame,
+                    current.aspect,
+                    current.rotation,
+                    width,
+                    height,
+                );
                 rerun = true;
             }
             EditHit::Aspect => {
@@ -1192,20 +1231,33 @@ impl App {
                     self.request_edit_render();
                 }
             }
-            Some(EditPointer::FrameMove { x, y, grab_x, grab_y }) => {
-                let Some(size) = self.shown_size else {
+            Some(EditPointer::Frame {
+                handle,
+                start,
+                grab_x,
+                grab_y,
+            }) => {
+                let Some((_, usable, _)) = self.edit_rects() else {
                     return;
                 };
-                let dx = (cursor.x - grab_x) / (size.x * self.view.scale).max(1.0);
-                let dy = (cursor.y - grab_y) / (size.y * self.view.scale).max(1.0);
+                let dx = (cursor.x - grab_x) / (usable[2] - usable[0]).max(1.0);
+                let dy = (cursor.y - grab_y) / (usable[3] - usable[1]).max(1.0);
                 if let Some(editing) = &mut self.editing {
-                    let w = editing.current.frame.w;
-                    let h = editing.current.frame.h;
-                    editing.current.frame.x = (x + dx).clamp(0.0, 1.0 - w);
-                    editing.current.frame.y = (y + dy).clamp(0.0, 1.0 - h);
+                    let (photo_w, photo_h) =
+                        oriented_extent(&editing.loaded.baseline, &editing.current);
+                    editing.current.frame = drag_frame(
+                        start,
+                        handle,
+                        dx,
+                        dy,
+                        editing.current.aspect,
+                        editing.current.rotation,
+                        photo_w,
+                        photo_h,
+                    );
                 }
-                // The frame is drawn over the picture. The pixels and the
-                // histogram catch up on release.
+                // The frame is drawn over the picture. The histogram catches
+                // up on release.
                 self.request_redraw();
             }
             Some(EditPointer::Compare) | None => {}
@@ -1218,13 +1270,14 @@ impl App {
         };
         let rerun = editing.scrubbing
             || editing.holding.is_some()
-            || matches!(editing.pointer, Some(EditPointer::FrameMove { .. }));
+            || matches!(editing.pointer, Some(EditPointer::Frame { .. }));
         editing.pointer = None;
         editing.holding = None;
         editing.scrubbing = false;
         if rerun {
             self.request_edit_render();
         }
+        self.update_edit_cursor();
         self.request_redraw();
     }
 
@@ -1265,6 +1318,7 @@ impl App {
 
     fn leave_edit(&mut self) {
         self.editing = None;
+        self.update_edit_cursor();
         if self.catalog.is_empty() {
             return;
         }
@@ -1313,38 +1367,128 @@ impl App {
         true
     }
 
-    fn press_on_frame(&mut self) -> bool {
-        let Some(editing) = self.editing.as_ref() else {
-            return false;
-        };
-        let Some(size) = self.shown_size else {
-            return false;
-        };
-        let screen = frame_screen(
+    /// The photo, the usable rectangle, and the frame on screen, each as
+    /// left, top, right, bottom. The frame is the one in view: a held compare
+    /// button shows its own.
+    fn edit_rects(&self) -> Option<([f32; 4], [f32; 4], [f32; 4])> {
+        let editing = self.editing.as_ref()?;
+        let size = self.shown_size?;
+        let scale = self.view.scale;
+        let photo = [
             self.view.pan.x,
             self.view.pan.y,
-            size.x,
-            size.y,
-            self.view.scale,
-            editing.current.frame.x,
-            editing.current.frame.y,
-            editing.current.frame.w,
-            editing.current.frame.h,
-        );
-        if self.cursor.x < screen[0] || self.cursor.x > screen[2] || self.cursor.y < screen[1] || self.cursor.y > screen[3]
-        {
+            self.view.pan.x + size.x * scale,
+            self.view.pan.y + size.y * scale,
+        ];
+        let [ux, uy, uw, uh] = editing.usable;
+        let usable = [
+            photo[0] + ux * size.x * scale,
+            photo[1] + uy * size.y * scale,
+            photo[0] + (ux + uw) * size.x * scale,
+            photo[1] + (uy + uh) * size.y * scale,
+        ];
+        let frame = shown_adjustments(editing).frame;
+        let usable_w = usable[2] - usable[0];
+        let usable_h = usable[3] - usable[1];
+        let screen = [
+            usable[0] + frame.x * usable_w,
+            usable[1] + frame.y * usable_h,
+            usable[0] + (frame.x + frame.w) * usable_w,
+            usable[1] + (frame.y + frame.h) * usable_h,
+        ];
+        Some((photo, usable, screen))
+    }
+
+    /// The part of the frame under the pointer. Edges and corners resize.
+    /// Inside a frame smaller than the picture, a drag moves it. Elsewhere,
+    /// and with Shift held, a drag pans.
+    fn frame_handle_at(&self, cursor: Vec2) -> Option<Handle> {
+        let editing = self.editing.as_ref()?;
+        if self.shift_down || editing.holding.is_some() {
+            return None;
+        }
+        let (_, _, [left, top, right, bottom]) = self.edit_rects()?;
+        let reach = 6.0 * self.scale_factor().max(1.0);
+        let inside_x = cursor.x > left - reach && cursor.x < right + reach;
+        let inside_y = cursor.y > top - reach && cursor.y < bottom + reach;
+        if !inside_x || !inside_y {
+            return None;
+        }
+        let near_left = (cursor.x - left).abs() <= reach;
+        let near_right = (cursor.x - right).abs() <= reach && !near_left;
+        let near_top = (cursor.y - top).abs() <= reach;
+        let near_bottom = (cursor.y - bottom).abs() <= reach && !near_top;
+        let handle = match (near_left, near_right, near_top, near_bottom) {
+            (true, _, true, _) => Handle::TopLeft,
+            (_, true, true, _) => Handle::TopRight,
+            (true, _, _, true) => Handle::BottomLeft,
+            (_, true, _, true) => Handle::BottomRight,
+            (true, ..) => Handle::Left,
+            (_, true, ..) => Handle::Right,
+            (_, _, true, _) => Handle::Top,
+            (.., true) => Handle::Bottom,
+            _ => {
+                let full = editing.current.frame.w >= 0.999 && editing.current.frame.h >= 0.999;
+                let strictly_inside =
+                    cursor.x > left && cursor.x < right && cursor.y > top && cursor.y < bottom;
+                if full || !strictly_inside {
+                    return None;
+                }
+                Handle::Move
+            }
+        };
+        Some(handle)
+    }
+
+    fn press_on_frame(&mut self) -> bool {
+        let Some(handle) = self.frame_handle_at(self.cursor) else {
             return false;
-        }
-        let frame = editing.current.frame;
-        if let Some(editing) = &mut self.editing {
-            editing.pointer = Some(EditPointer::FrameMove {
-                x: frame.x,
-                y: frame.y,
-                grab_x: self.cursor.x,
-                grab_y: self.cursor.y,
-            });
-        }
+        };
+        let cursor = self.cursor;
+        let Some(editing) = self.editing.as_mut() else {
+            return false;
+        };
+        editing.pointer = Some(EditPointer::Frame {
+            handle,
+            start: editing.current.frame,
+            grab_x: cursor.x,
+            grab_y: cursor.y,
+        });
         true
+    }
+
+    /// The pointer guide follows the pointer, so every move redraws it.
+    fn pointer_guide_shown(&self) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|editing| editing.guide == Guide::Pointer)
+    }
+
+    /// Resize arrows over the frame's edges, a move cursor inside it.
+    fn update_edit_cursor(&mut self) {
+        let icon = if self.editing.is_some() {
+            let handle = match self.editing.as_ref().and_then(|editing| editing.pointer) {
+                Some(EditPointer::Frame { handle, .. }) => Some(handle),
+                Some(_) => None,
+                None => self.frame_handle_at(self.cursor),
+            };
+            match handle {
+                Some(Handle::Left | Handle::Right) => CursorIcon::EwResize,
+                Some(Handle::Top | Handle::Bottom) => CursorIcon::NsResize,
+                Some(Handle::TopLeft | Handle::BottomRight) => CursorIcon::NwseResize,
+                Some(Handle::TopRight | Handle::BottomLeft) => CursorIcon::NeswResize,
+                Some(Handle::Move) => CursorIcon::Move,
+                None => CursorIcon::Default,
+            }
+        } else {
+            CursorIcon::Default
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(window) = &self.window {
+                window.set_cursor(icon);
+            }
+        }
     }
 
     fn cursor_or_center(&self) -> Vec2 {
@@ -1740,6 +1884,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             WindowEvent::Focused(false) => self.dragging = false,
+            WindowEvent::CursorLeft { .. } => {
+                // The pointer guide hides while the pointer is off the photo.
+                self.cursor_valid = false;
+                if self.pointer_guide_shown() {
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_down = modifiers.state().shift_key();
+                self.update_edit_cursor();
+            }
             WindowEvent::Occluded(false) => self.request_redraw(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
@@ -1802,6 +1957,11 @@ impl ApplicationHandler<UserEvent> for App {
                             self.edit_press(hit);
                             return;
                         }
+                        if self.cursor.x >= panel.x {
+                            // Empty panel space, or a greyed-out button.
+                            self.dragging = false;
+                            return;
+                        }
                     }
                     if self.press_on_frame() {
                         self.dragging = false;
@@ -1842,6 +2002,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.edit_drag(next);
                     return;
                 }
+                if self.editing.is_some() && !self.dragging {
+                    self.cursor = next;
+                    self.cursor_valid = true;
+                    self.update_edit_cursor();
+                    if self.pointer_guide_shown() {
+                        self.request_redraw();
+                    }
+                }
                 if self.seeking {
                     self.seek_video_at(next.x);
                 } else if self.dragging && self.cursor_valid && self.image_shown() {
@@ -1866,6 +2034,17 @@ impl ApplicationHandler<UserEvent> for App {
                 let transport = self.transport_draw(label.as_deref());
                 let quads = self.edit_quads();
                 let panel = self.edit_panel();
+                let labels: Vec<Label> = panel
+                    .iter()
+                    .flat_map(|panel| &panel.compare)
+                    .map(|button| Label {
+                        text: button.text,
+                        x0: button.rect[0],
+                        x1: button.rect[2],
+                        top: button.top,
+                        color: if button.enabled { [255, 255, 255] } else { [105, 105, 105] },
+                    })
+                    .collect();
                 let frame = Frame {
                     image_width,
                     image_height,
@@ -1880,6 +2059,7 @@ impl ApplicationHandler<UserEvent> for App {
                     panel_text: panel.as_ref().map(|panel| panel.text.as_str()),
                     panel_left: panel.as_ref().map(|panel| panel.x + 8.0).unwrap_or(0.0),
                     panel_top: panel.as_ref().map(|panel| panel.text_top).unwrap_or(0.0),
+                    labels: &labels,
                 };
                 let Some(gpu) = &mut self.gpu else {
                     return;

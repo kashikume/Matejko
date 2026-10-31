@@ -255,8 +255,8 @@ pub struct RunOptions {
     /// uses drag width / full width. A full run uses 1.
     pub radius_scale: f32,
     pub dither: bool,
-    /// Save crops to the frame. The on-screen picture keeps the usable
-    /// rectangle so the margin outside the frame can be dimmed.
+    /// Save crops to the frame. The on-screen picture keeps the whole
+    /// rotated photo, so the margin and the empty corners can be dimmed.
     pub crop: bool,
 }
 
@@ -272,6 +272,8 @@ impl Default for RunOptions {
 
 pub fn run(baseline: &Image, adj: &Adjustments, options: &RunOptions) -> Image {
     let mut image = orient(baseline, adj);
+    // Read before any tone stage moves the ceiling.
+    let clipped = (adj.shadow != 0.0 || adj.highlight != 0.0).then(|| clip_mask(&image));
     if adj.temperature != 0.0 || adj.tint != 0.0 {
         white_balance(&mut image, adj.temperature, adj.tint);
     }
@@ -282,8 +284,14 @@ pub fn run(baseline: &Image, adj: &Adjustments, options: &RunOptions) -> Image {
     if adj.blackpoint != 0.0 {
         blackpoint(&mut image, adj.blackpoint);
     }
-    if adj.shadow != 0.0 || adj.highlight != 0.0 {
-        image = shadows_highlights(&image, adj.shadow, adj.highlight);
+    if let Some(clipped) = clipped {
+        image = shadows_highlights(
+            image,
+            &clipped,
+            adj.shadow,
+            adj.highlight,
+            options.radius_scale,
+        );
     }
     let encoded = adj.brightness != 0.0
         || adj.contrast != 0.0
@@ -309,13 +317,12 @@ pub fn run(baseline: &Image, adj: &Adjustments, options: &RunOptions) -> Image {
         }
         decode_inplace(&mut image);
     }
-    let frame = if options.crop {
-        adj.frame
-    } else {
-        Frame::default()
-    };
-    if adj.rotation != 0.0 || frame != Frame::default() {
-        image = resample_frame(&image, adj.rotation, frame);
+    if options.crop {
+        if adj.rotation != 0.0 || adj.frame != Frame::default() {
+            image = crop_frame(&image, adj.rotation, adj.frame);
+        }
+    } else if adj.rotation != 0.0 {
+        image = rotate_canvas(&image, adj.rotation);
     }
     let _ = options.dither;
     image
@@ -579,14 +586,24 @@ fn skin_mask(r: f32, g: f32, b: f32, chroma: f32) -> f32 {
     chroma * (0.5 - 0.5 * (std::f32::consts::TAU * t).cos())
 }
 
-fn shadows_highlights(image: &Image, shadow: f32, highlight: f32) -> Image {
+/// `clipped` marks, per pixel, the channels that were on the ceiling in the
+/// file (bit 0 red, 1 green, 2 blue). See `clip_mask`.
+fn shadows_highlights(
+    mut image: Image,
+    clipped: &[u8],
+    shadow: f32,
+    highlight: f32,
+    radius_scale: f32,
+) -> Image {
+    let tile = ((REPAIR_TILE as f32 * radius_scale).round() as usize).max(4);
+    repair_clipped(&mut image, clipped, tile);
     // 10% of the short side of the image this run is on. A preview is
     // smaller, so its radius shrinks with it.
     let short = image.width.min(image.height) as f32;
     let radius = (0.10 * short).clamp(1.0, short);
-    let luma = linear_luma(image);
+    let luma = linear_luma(&image);
     let base = guided_filter(&luma, image.width, image.height, radius as u32, 0.02 * 0.02);
-    let mut out = image.clone();
+    let mut out = image;
     let t_s = 0.18;
     let tau_s = 0.02;
     let a_s = 0.05;
@@ -632,6 +649,117 @@ fn shadows_highlights(image: &Image, shadow: f32, highlight: f32) -> Image {
             }
         });
     out
+}
+
+/// Tile side for the clipped-channel ratios. The median is taken over a tile
+/// and its eight neighbours, about 32 px either side.
+const REPAIR_TILE: usize = 16;
+/// A sibling channel below this carries no usable ratio.
+const REPAIR_FLOOR: f32 = 0.01;
+
+/// Per pixel, bit `k` is set when channel `k` was on the ceiling in the
+/// file. A JPEG has already clipped, so codes 254 and 255 are the ceiling.
+fn clip_mask(image: &Image) -> Vec<u8> {
+    let ceiling = decode(253.5 / 255.0);
+    image
+        .rgb
+        .par_chunks_exact(3)
+        .map(|px| {
+            (px[0] >= ceiling) as u8
+                | ((px[1] >= ceiling) as u8) << 1
+                | ((px[2] >= ceiling) as u8) << 2
+        })
+        .collect()
+}
+
+/// Rebuilds a clipped channel `k` from an unclipped sibling `j`:
+/// `k = j · median(k / j)` over nearby pixels where `k` was not clipped and
+/// `j` is above the floor. A pixel with all three clipped, or with no such
+/// neighbours, stays. A repair never lowers a channel below its clipped value.
+fn repair_clipped(image: &mut Image, clipped: &[u8], tile: usize) {
+    let partial = |m: u8| m != 0 && m != 0b111;
+    if !clipped.par_iter().any(|m| partial(*m)) {
+        return;
+    }
+    let w = image.width as usize;
+    let h = image.height as usize;
+    let tiles_w = w.div_ceil(tile);
+    let tiles_h = h.div_ceil(tile);
+    let needs: Vec<bool> = (0..tiles_w * tiles_h)
+        .into_par_iter()
+        .map(|t| {
+            let (tx, ty) = (t % tiles_w, t / tiles_w);
+            (ty * tile..((ty + 1) * tile).min(h)).any(|y| {
+                (tx * tile..((tx + 1) * tile).min(w)).any(|x| partial(clipped[y * w + x]))
+            })
+        })
+        .collect();
+    let rgb = &image.rgb;
+    // medians[t][k * 3 + j] is the median of k / j around tile t, or NaN.
+    let medians: Vec<[f32; 9]> = (0..tiles_w * tiles_h)
+        .into_par_iter()
+        .map(|t| {
+            let mut out = [f32::NAN; 9];
+            if !needs[t] {
+                return out;
+            }
+            let (tx, ty) = (t % tiles_w, t / tiles_w);
+            let x0 = tx.saturating_sub(1) * tile;
+            let x1 = ((tx + 2) * tile).min(w);
+            let y0 = ty.saturating_sub(1) * tile;
+            let y1 = ((ty + 2) * tile).min(h);
+            let mut samples: [Vec<f32>; 9] = Default::default();
+            // Every second pixel each way is plenty for a median.
+            for y in (y0..y1).step_by(2) {
+                for x in (x0..x1).step_by(2) {
+                    let i = y * w + x;
+                    let px = &rgb[i * 3..i * 3 + 3];
+                    for k in 0..3 {
+                        if clipped[i] & (1 << k) != 0 {
+                            continue;
+                        }
+                        for j in 0..3 {
+                            if j != k && px[j] > REPAIR_FLOOR {
+                                samples[k * 3 + j].push(px[k] / px[j]);
+                            }
+                        }
+                    }
+                }
+            }
+            for (slot, values) in out.iter_mut().zip(samples.iter_mut()) {
+                if !values.is_empty() {
+                    let mid = values.len() / 2;
+                    *slot = *values.select_nth_unstable_by(mid, f32::total_cmp).1;
+                }
+            }
+            out
+        })
+        .collect();
+    image
+        .rgb
+        .par_chunks_mut(w * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, px) in row.chunks_exact_mut(3).enumerate() {
+                let m = clipped[y * w + x];
+                if !partial(m) {
+                    continue;
+                }
+                // The larger unclipped channel is the reference.
+                let j = (0..3)
+                    .filter(|c| m & (1 << c) == 0)
+                    .max_by(|a, b| px[*a].total_cmp(&px[*b]))
+                    .unwrap_or(0);
+                let tile_index = (y / tile) * tiles_w + x / tile;
+                for k in (0..3).filter(|c| m & (1 << c) != 0) {
+                    let ratio = medians[tile_index][k * 3 + j];
+                    let rebuilt = px[j] * ratio;
+                    if rebuilt.is_finite() {
+                        px[k] = px[k].max(rebuilt);
+                    }
+                }
+            }
+        });
 }
 
 fn linear_luma(image: &Image) -> Vec<f32> {
@@ -776,7 +904,16 @@ fn box_mean(src: &[f32], width: u32, height: u32, radius: u32) -> Vec<f32> {
 /// Pyramid levels for a full-resolution run. Bands 1..LEVELS-1 are the
 /// mid frequencies clarity owns.
 const CLARITY_LEVELS: usize = 6;
+/// Reference tones the remap is sampled at, evenly over [0, 1]. Their
+/// spacing, 1/7, is about the detail amplitude `τ`.
+const CLARITY_REFERENCES: usize = 8;
 
+/// Fast local Laplacian (Aubry et al. 2014) on encoded luma. For each
+/// reference tone γ the luma is remapped with
+/// `r(i) = i + a · (i − γ) · exp(−(i − γ)² / 2τ²)` and its band-pass levels
+/// are built. Each output coefficient takes the two references around its
+/// own Gaussian level and interpolates between them. Chroma goes back as
+/// the per-channel offset from luma.
 fn clarity(image: &Image, slider: f32, radius_scale: f32) -> Image {
     let a = slider / 100.0;
     let tau = 0.12_f32;
@@ -791,46 +928,52 @@ fn clarity(image: &Image, slider: f32, radius_scale: f32) -> Image {
         .par_chunks_exact(3)
         .map(|px| (0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]).clamp(0.0, 1.0))
         .collect();
-    let pyramid = gaussian_pyramid(&luma, width, height, levels);
-    if pyramid.len() < 3 {
+    let gauss = gaussian_pyramid(luma.clone(), width, height, levels);
+    let n = gauss.len();
+    if n < 3 || first_band >= n - 1 {
         return image.clone();
     }
-    let mut laplacian: Vec<Vec<f32>> = Vec::new();
-    for i in 0..pyramid.len() - 1 {
-        let up = upsample_sized(
-            &pyramid[i + 1].0,
-            pyramid[i + 1].1,
-            pyramid[i + 1].2,
-            pyramid[i].1,
-            pyramid[i].2,
-        );
-        laplacian.push(
-            pyramid[i]
-                .0
-                .par_iter()
-                .zip(up.par_iter())
-                .map(|(pixel, upsampled)| pixel - upsampled)
-                .collect(),
-        );
+    // Bands below `first_band` are the input's own.
+    let mut bands: Vec<Vec<f32>> = (0..n - 1)
+        .map(|level| {
+            if level < first_band {
+                laplacian_band(&gauss, level)
+            } else {
+                vec![0.0; gauss[level].0.len()]
+            }
+        })
+        .collect();
+    let spacing = 1.0 / (CLARITY_REFERENCES - 1) as f32;
+    for j in 0..CLARITY_REFERENCES {
+        let gamma = j as f32 * spacing;
+        let remapped: Vec<f32> = luma
+            .par_iter()
+            .map(|i| {
+                let delta = i - gamma;
+                i + a * delta * (-(delta * delta) / (2.0 * tau * tau)).exp()
+            })
+            .collect();
+        let remapped = gaussian_pyramid(remapped, width, height, n);
+        for (level, band) in bands.iter_mut().enumerate().skip(first_band) {
+            let coefficients = laplacian_band(&remapped, level);
+            band.par_iter_mut()
+                .zip(coefficients.par_iter().zip(gauss[level].0.par_iter()))
+                .for_each(|(out, (coefficient, g))| {
+                    // Hat weight: 1 at γ, 0 one spacing away.
+                    let weight = 1.0 - ((g - gamma).abs() / spacing);
+                    if weight > 0.0 {
+                        *out += weight * coefficient;
+                    }
+                });
+        }
     }
-    laplacian.push(pyramid.last().unwrap().0.clone());
-    let last = laplacian.len() - 1;
-    for level in first_band..last {
-        laplacian[level].par_iter_mut().for_each(|coef| {
-            let delta = *coef;
-            *coef = delta * (1.0 + a * (-(delta * delta) / (2.0 * tau * tau)).exp());
-        });
-    }
-    let mut current = laplacian.pop().unwrap();
-    let mut current_w = pyramid.last().unwrap().1;
-    let mut current_h = pyramid.last().unwrap().2;
-    for level in (0..laplacian.len()).rev() {
-        let gauss_w = pyramid[level].1;
-        let gauss_h = pyramid[level].2;
+    let (mut current, mut current_w, mut current_h) = gauss.last().cloned().unwrap();
+    for level in (0..n - 1).rev() {
+        let (_, gauss_w, gauss_h) = gauss[level];
         let mut up = upsample_sized(&current, current_w, current_h, gauss_w, gauss_h);
         up.par_iter_mut()
-            .zip(laplacian[level].par_iter())
-            .for_each(|(upsampled, lap)| *upsampled += lap);
+            .zip(bands[level].par_iter())
+            .for_each(|(upsampled, band)| *upsampled += band);
         current = up;
         current_w = gauss_w;
         current_h = gauss_h;
@@ -843,23 +986,34 @@ fn clarity(image: &Image, slider: f32, radius_scale: f32) -> Image {
             let first = chunk * CHUNK / 3;
             for (j, px) in pixels.chunks_exact_mut(3).enumerate() {
                 let i = first + j;
-                let old = luma[i].max(1.0e-6);
-                let scale = current[i].clamp(0.0, 1.0) / old;
+                let offset = current[i].clamp(0.0, 1.0) - luma[i];
                 for channel in px.iter_mut() {
-                    *channel = (*channel * scale).clamp(0.0, 1.0);
+                    *channel = (*channel + offset).clamp(0.0, 1.0);
                 }
             }
         });
     out
 }
 
+/// Level `level` of the Laplacian pyramid: the Gaussian level minus the
+/// next one brought back up to its size.
+fn laplacian_band(gauss: &[(Vec<f32>, u32, u32)], level: usize) -> Vec<f32> {
+    let (fine, w, h) = &gauss[level];
+    let (coarse, cw, ch) = &gauss[level + 1];
+    let mut band = upsample_sized(coarse, *cw, *ch, *w, *h);
+    band.par_iter_mut()
+        .zip(fine.par_iter())
+        .for_each(|(out, pixel)| *out = pixel - *out);
+    band
+}
+
 fn gaussian_pyramid(
-    src: &[f32],
+    src: Vec<f32>,
     width: u32,
     height: u32,
     max_levels: usize,
 ) -> Vec<(Vec<f32>, u32, u32)> {
-    let mut levels = vec![(src.to_vec(), width, height)];
+    let mut levels = vec![(src, width, height)];
     let mut w = width;
     let mut h = height;
     while w > 2 && h > 2 && levels.len() < max_levels {
@@ -951,39 +1105,129 @@ fn upsample_sized(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -
     out
 }
 
-fn resample_frame(image: &Image, rotation_deg: f32, frame: Frame) -> Image {
+/// The kept rectangle in pixels of the rotated canvas, which has the size of
+/// the oriented image: left, top, width, height.
+fn frame_pixels(width: f32, height: f32, theta: f32, frame: Frame) -> (f32, f32, f32, f32) {
+    // The frame may reach past the usable rectangle where the turned photo
+    // does. Drags and rotation changes keep its corners on the photo.
+    let (ux, uy, uw, uh) = usable_rect(width, height, theta);
+    let (x, y, w, h) = if theta.abs() < 1.0e-6 {
+        // Upright, the photo is the usable rectangle.
+        let w = frame.w.clamp(0.0, 1.0);
+        let h = frame.h.clamp(0.0, 1.0);
+        (frame.x.clamp(0.0, 1.0 - w), frame.y.clamp(0.0, 1.0 - h), w, h)
+    } else {
+        (frame.x, frame.y, frame.w, frame.h)
+    };
+    (ux + x * uw, uy + y * uh, (w * uw).max(1.0), (h * uh).max(1.0))
+}
+
+/// Horizon, then frame: one resample into an image the size of the frame.
+fn crop_frame(image: &Image, rotation_deg: f32, frame: Frame) -> Image {
     let theta = rotation_deg.to_radians();
-    let (ux, uy, uw, uh) = usable_rect(image.width as f32, image.height as f32, theta);
-    let x0 = ux + frame.x.clamp(0.0, 1.0) * uw;
-    let y0 = uy + frame.y.clamp(0.0, 1.0) * uh;
-    let fw = (frame.w.clamp(0.0, 1.0) * uw).max(1.0);
-    let fh = (frame.h.clamp(0.0, 1.0) * uh).max(1.0);
+    let (x0, y0, fw, fh) = frame_pixels(image.width as f32, image.height as f32, theta, frame);
+    if theta.abs() < 1.0e-6 {
+        // No turn: whole pixels, copied without a kernel.
+        let left = (x0.round() as u32).min(image.width - 1);
+        let top = (y0.round() as u32).min(image.height - 1);
+        let width = (fw.round() as u32).clamp(1, image.width - left);
+        let height = (fh.round() as u32).clamp(1, image.height - top);
+        return copy_region(image, left, top, width, height);
+    }
     let out_w = fw.round().max(1.0) as u32;
     let out_h = fh.round().max(1.0) as u32;
-    if theta.abs() < 1.0e-6 && frame == Frame::default() {
-        return image.clone();
+    resample_region(image, theta, x0, y0, fw, fh, out_w, out_h)
+}
+
+/// The whole rotated photo on a canvas of its own size. The corners the
+/// photo leaves are 0.
+fn rotate_canvas(image: &Image, rotation_deg: f32) -> Image {
+    let (out_w, out_h) = rotated_bounds(image.width, image.height, rotation_deg);
+    // The bounding box shares the photo's centre.
+    resample_region(
+        image,
+        rotation_deg.to_radians(),
+        (image.width as f32 - out_w as f32) * 0.5,
+        (image.height as f32 - out_h as f32) * 0.5,
+        out_w as f32,
+        out_h as f32,
+        out_w,
+        out_h,
+    )
+}
+
+/// Size of the upright box that holds the whole photo turned by the angle.
+pub fn rotated_bounds(width: u32, height: u32, rotation_deg: f32) -> (u32, u32) {
+    let theta = rotation_deg.to_radians();
+    if theta.abs() < 1.0e-6 {
+        return (width, height);
     }
+    let (sin, cos) = (theta.sin().abs(), theta.cos().abs());
+    let (w, h) = (width as f32, height as f32);
+    // The small allowance keeps float noise, as at 90°, from adding a column.
+    (
+        (w * cos + h * sin - 1.0e-3).ceil() as u32,
+        (w * sin + h * cos - 1.0e-3).ceil() as u32,
+    )
+}
+
+fn copy_region(image: &Image, left: u32, top: u32, width: u32, height: u32) -> Image {
+    let mut out = Image {
+        width,
+        height,
+        rgb: vec![0.0; (width as usize) * (height as usize) * 3],
+    };
+    let src_stride = image.width as usize * 3;
+    out.rgb
+        .par_chunks_mut(width as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let start = (top as usize + y) * src_stride + left as usize * 3;
+            row.copy_from_slice(&image.rgb[start..start + row.len()]);
+        });
+    out
+}
+
+/// Samples the canvas region `x0, y0, fw, fh` into `out_w × out_h` pixels.
+/// Coordinates are pixel edges: pixel `i` covers `[i, i + 1)`. Positive
+/// `theta` turns the picture counterclockwise on screen, so the sample for
+/// an output point is found by turning it clockwise about the centre.
+#[allow(clippy::too_many_arguments)]
+fn resample_region(
+    image: &Image,
+    theta: f32,
+    x0: f32,
+    y0: f32,
+    fw: f32,
+    fh: f32,
+    out_w: u32,
+    out_h: u32,
+) -> Image {
     let mut out = Image {
         width: out_w,
         height: out_h,
         rgb: vec![0.0; (out_w as usize) * (out_h as usize) * 3],
     };
-    let cx = (image.width as f32 - 1.0) * 0.5;
-    let cy = (image.height as f32 - 1.0) * 0.5;
+    let width = image.width as f32;
+    let height = image.height as f32;
+    let cx = width * 0.5;
+    let cy = height * 0.5;
     let cos = theta.cos();
     let sin = theta.sin();
     out.rgb
         .par_chunks_mut(out_w as usize * 3)
         .enumerate()
         .for_each(|(y, row)| {
-            let py = y0 + (y as f32 + 0.5) * fh / out_h as f32;
+            let dy = y0 + (y as f32 + 0.5) * fh / out_h as f32 - cy;
             for (x, px) in row.chunks_exact_mut(3).enumerate() {
-                let sample_x = x0 + (x as f32 + 0.5) * fw / out_w as f32;
-                let dx = sample_x - cx;
-                let dy = py - cy;
-                let sx = cos * dx + sin * dy + cx;
-                let sy = -sin * dx + cos * dy + cy;
-                let sample = sample_catmull(image, sx, sy);
+                let dx = x0 + (x as f32 + 0.5) * fw / out_w as f32 - cx;
+                let sx = cos * dx - sin * dy + cx;
+                let sy = sin * dx + cos * dy + cy;
+                if sx < 0.0 || sy < 0.0 || sx > width || sy > height {
+                    continue;
+                }
+                // Pixel centres sit at half-integers.
+                let sample = sample_catmull(image, sx - 0.5, sy - 0.5);
                 for (dst, v) in px.iter_mut().zip(sample) {
                     *dst = if v.is_finite() { v } else { 0.0 };
                 }
@@ -1016,12 +1260,12 @@ fn sample_catmull(image: &Image, x: f32, y: f32) -> [f32; 3] {
     ]
 }
 
+/// Taps past the edge repeat the edge pixel, so a sample just inside the
+/// photo is not darkened by the empty canvas around it.
 fn tap(image: &Image, x: i32, y: i32) -> [f32; 3] {
-    if x < 0 || y < 0 || x >= image.width as i32 || y >= image.height as i32 {
-        [0.0, 0.0, 0.0]
-    } else {
-        image.pixel(x as u32, y as u32)
-    }
+    let x = x.clamp(0, image.width as i32 - 1) as u32;
+    let y = y.clamp(0, image.height as i32 - 1) as u32;
+    image.pixel(x, y)
 }
 
 fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
@@ -1033,28 +1277,53 @@ fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
         + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 }
 
+/// The largest upright rectangle inside the photo turned by `theta`, centred
+/// on the canvas: left, top, width, height.
 pub fn usable_rect(width: f32, height: f32, theta: f32) -> (f32, f32, f32, f32) {
-    if theta.abs() < 1.0e-6 {
+    let angle = theta.abs();
+    if angle < 1.0e-6 {
         return (0.0, 0.0, width, height);
     }
-    let cos = theta.cos().abs();
-    let sin = theta.sin().abs();
-    let w_limit = width * cos - height * sin;
-    let h_limit = height * cos - width * sin;
-    let (uw, uh) = if w_limit > 0.0 && h_limit > 0.0 {
-        (w_limit, h_limit)
-    } else if width * sin >= height * cos {
-        let uh = width * cos + height * sin;
-        let uw = width * height / uh.max(1.0);
-        (uw, height.min(uh))
+    let sin_a = angle.sin();
+    let cos_a = angle.cos();
+    let width_is_longer = width >= height;
+    let (side_long, side_short) = if width_is_longer {
+        (width, height)
     } else {
-        let uw = width * cos + height * sin;
-        let uh = width * height / uw.max(1.0);
-        (width.min(uw), uh)
+        (height, width)
+    };
+    let (uw, uh) = if side_short <= 2.0 * sin_a * cos_a * side_long
+        || (sin_a - cos_a).abs() < 1.0e-6
+    {
+        // Constrained by the short side: two corners touch the long sides.
+        let x = 0.5 * side_short;
+        if width_is_longer {
+            (x / sin_a, x / cos_a)
+        } else {
+            (x / cos_a, x / sin_a)
+        }
+    } else {
+        // All four corners touch the photo's sides.
+        let cos_2a = cos_a * cos_a - sin_a * sin_a;
+        (
+            (width * cos_a - height * sin_a) / cos_2a,
+            (height * cos_a - width * sin_a) / cos_2a,
+        )
     };
     let uw = uw.clamp(1.0, width);
     let uh = uh.clamp(1.0, height);
     ((width - uw) * 0.5, (height - uh) * 0.5, uw, uh)
+}
+
+/// The usable rectangle as fractions of the canvas: left, top, width, height.
+/// The usable rectangle as fractions of the on-screen picture, which is the
+/// whole photo of `width × height` turned and boxed by `rotated_bounds`:
+/// left, top, width, height.
+pub fn usable_fraction(width: u32, height: u32, rotation_deg: f32) -> [f32; 4] {
+    let (_, _, uw, uh) = usable_rect(width as f32, height as f32, rotation_deg.to_radians());
+    let (bw, bh) = rotated_bounds(width, height, rotation_deg);
+    let (bw, bh) = (bw as f32, bh as f32);
+    [(bw - uw) * 0.5 / bw, (bh - uh) * 0.5 / bh, uw / bw, uh / bh]
 }
 
 pub fn fit_aspect(aspect: Aspect, rotation_deg: f32, width: f32, height: f32) -> Frame {
@@ -1078,29 +1347,263 @@ pub fn fit_aspect(aspect: Aspect, rotation_deg: f32, width: f32, height: f32) ->
     }
 }
 
-pub fn clamp_frame_to_photo(frame: Frame, aspect: Aspect, rotation_deg: f32, width: f32, height: f32) -> Frame {
-    let fitted = fit_aspect(aspect, rotation_deg, width, height);
-    if aspect == Aspect::Free {
-        Frame {
-            x: frame.x.clamp(0.0, 1.0 - frame.w.max(0.01)),
-            y: frame.y.clamp(0.0, 1.0 - frame.h.max(0.01)),
-            w: frame.w.clamp(0.01, 1.0),
-            h: frame.h.clamp(0.01, 1.0),
+/// Smallest frame side, as a fraction of the usable rectangle.
+const MIN_FRAME: f32 = 0.02;
+
+/// Where a stored frame may sit. The frame is kept in fractions of the
+/// usable rectangle, but it may reach past it wherever the turned photo
+/// does: the rule is only that all four corners lie on the photo.
+struct FrameSpace {
+    uw: f32,
+    uh: f32,
+    half_w: f32,
+    half_h: f32,
+    cos: f32,
+    sin: f32,
+}
+
+impl FrameSpace {
+    fn new(rotation_deg: f32, photo_w: f32, photo_h: f32) -> Self {
+        let theta = rotation_deg.to_radians();
+        let (_, _, uw, uh) = usable_rect(photo_w, photo_h, theta);
+        Self {
+            uw,
+            uh,
+            half_w: photo_w * 0.5,
+            half_h: photo_h * 0.5,
+            cos: theta.cos(),
+            sin: theta.sin(),
         }
-    } else if frame_inside(frame) && frame.w <= fitted.w + 0.001 && frame.h <= fitted.h + 0.001 {
-        frame
-    } else {
-        fitted
+    }
+
+    /// A point given in fractions of the usable rectangle lies on the photo.
+    fn on_photo(&self, fx: f32, fy: f32) -> bool {
+        // Offsets from the centre, which the usable rectangle shares.
+        let dx = (fx - 0.5) * self.uw;
+        let dy = (fy - 0.5) * self.uh;
+        let sx = self.cos * dx - self.sin * dy;
+        let sy = self.sin * dx + self.cos * dy;
+        // A hundredth of a pixel of slack keeps a corner on the border in.
+        sx.abs() <= self.half_w + 0.01 && sy.abs() <= self.half_h + 0.01
+    }
+
+    fn fits(&self, frame: Frame) -> bool {
+        frame.w >= MIN_FRAME * 0.999
+            && frame.h >= MIN_FRAME * 0.999
+            && self.on_photo(frame.x, frame.y)
+            && self.on_photo(frame.x + frame.w, frame.y)
+            && self.on_photo(frame.x, frame.y + frame.h)
+            && self.on_photo(frame.x + frame.w, frame.y + frame.h)
+    }
+
+    /// The frame furthest along `make(0) → make(1)` that still fits.
+    /// `make(0)` is where the drag started and is taken to fit.
+    fn furthest(&self, make: impl Fn(f32) -> Frame) -> Frame {
+        if self.fits(make(1.0)) {
+            return make(1.0);
+        }
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            let mid = 0.5 * (lo + hi);
+            if self.fits(make(mid)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        make(lo)
     }
 }
 
-fn frame_inside(frame: Frame) -> bool {
-    frame.x >= 0.0
-        && frame.y >= 0.0
-        && frame.w > 0.0
-        && frame.h > 0.0
-        && frame.x + frame.w <= 1.0 + 1.0e-4
-        && frame.y + frame.h <= 1.0 + 1.0e-4
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn lerp_frame(a: Frame, b: Frame, t: f32) -> Frame {
+    Frame {
+        x: lerp(a.x, b.x, t),
+        y: lerp(a.y, b.y, t),
+        w: lerp(a.w, b.w, t),
+        h: lerp(a.h, b.h, t),
+    }
+}
+
+/// Puts a stored frame back on the photo, for example after the rotation
+/// changed. A locked ratio keeps the frame's centre and width, and its height
+/// is recomputed in pixels of the new usable rectangle. A frame that no
+/// longer fits is drawn toward the centred fit until its corners are back on
+/// the photo, so a full frame stays the full usable rectangle.
+pub fn clamp_frame_to_photo(
+    frame: Frame,
+    aspect: Aspect,
+    rotation_deg: f32,
+    width: f32,
+    height: f32,
+) -> Frame {
+    let space = FrameSpace::new(rotation_deg, width, height);
+    let w = frame.w.max(MIN_FRAME);
+    let mut h = frame.h.max(MIN_FRAME);
+    if let Some(ratio) = aspect.ratio(width, height) {
+        h = w * space.uw / (space.uh * ratio);
+    }
+    let wanted = Frame {
+        x: frame.x + (frame.w - w) * 0.5,
+        y: frame.y + (frame.h - h) * 0.5,
+        w,
+        h,
+    };
+    if space.fits(wanted) {
+        return wanted;
+    }
+    // The centred fit lies inside the usable rectangle, so it is on the
+    // photo. Every frame between the two has its corners between two points
+    // on the photo, which is convex, so the search below is sound.
+    let safe = fit_aspect(aspect, rotation_deg, width, height);
+    space.furthest(|t| lerp_frame(safe, wanted, t))
+}
+
+/// The part of the frame a pointer drag holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handle {
+    Move,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Handle {
+    fn moves_left(self) -> bool {
+        matches!(self, Handle::Left | Handle::TopLeft | Handle::BottomLeft)
+    }
+
+    fn moves_right(self) -> bool {
+        matches!(self, Handle::Right | Handle::TopRight | Handle::BottomRight)
+    }
+
+    fn moves_top(self) -> bool {
+        matches!(self, Handle::Top | Handle::TopLeft | Handle::TopRight)
+    }
+
+    fn moves_bottom(self) -> bool {
+        matches!(self, Handle::Bottom | Handle::BottomLeft | Handle::BottomRight)
+    }
+}
+
+/// The frame after dragging `handle` by `dx`, `dy`, in fractions of the
+/// usable rectangle, from where it was at the press. The frame may go
+/// wherever the turned photo is. An edge pulled past the photo's border
+/// stops on it and stays there, which is the snap. A moved frame slides
+/// along the border. A locked ratio holds in pixels.
+#[allow(clippy::too_many_arguments)]
+pub fn drag_frame(
+    start: Frame,
+    handle: Handle,
+    dx: f32,
+    dy: f32,
+    aspect: Aspect,
+    rotation_deg: f32,
+    photo_w: f32,
+    photo_h: f32,
+) -> Frame {
+    let space = FrameSpace::new(rotation_deg, photo_w, photo_h);
+    // A locked frame whose shape does not match the ratio at this angle, or
+    // a frame off the photo, is first put right, so the drag starts from a
+    // frame that fits.
+    let start = if aspect.ratio(photo_w, photo_h).is_some() || !space.fits(start) {
+        clamp_frame_to_photo(start, aspect, rotation_deg, photo_w, photo_h)
+    } else {
+        start
+    };
+    let left = start.x;
+    let top = start.y;
+    let right = start.x + start.w;
+    let bottom = start.y + start.h;
+    if handle == Handle::Move {
+        // One axis at a time, so a frame stopped by the border on one side
+        // still follows the pointer along it.
+        let moved = space.furthest(|t| Frame {
+            x: left + dx * t,
+            ..start
+        });
+        return space.furthest(|t| Frame {
+            y: top + dy * t,
+            ..moved
+        });
+    }
+    let Some(ratio) = aspect.ratio(photo_w, photo_h) else {
+        let target_left = (left + dx).min(right - MIN_FRAME);
+        let target_right = (right + dx).max(left + MIN_FRAME);
+        let target_top = (top + dy).min(bottom - MIN_FRAME);
+        let target_bottom = (bottom + dy).max(top + MIN_FRAME);
+        let across = space.furthest(|t| {
+            let mut frame = start;
+            if handle.moves_left() {
+                frame.x = lerp(left, target_left, t);
+                frame.w = right - frame.x;
+            }
+            if handle.moves_right() {
+                frame.w = lerp(right, target_right, t) - left;
+            }
+            frame
+        });
+        return space.furthest(|t| {
+            let mut frame = across;
+            if handle.moves_top() {
+                frame.y = lerp(top, target_top, t);
+                frame.h = bottom - frame.y;
+            }
+            if handle.moves_bottom() {
+                frame.h = lerp(bottom, target_bottom, t) - top;
+            }
+            frame
+        });
+    };
+    // Locked: h = w · k, in fractions.
+    let k = space.uw / (space.uh * ratio);
+    let horizontal = handle.moves_left() || handle.moves_right();
+    let vertical = handle.moves_top() || handle.moves_bottom();
+    let w_from_x = if handle.moves_left() {
+        start.w - dx
+    } else {
+        start.w + dx
+    };
+    let h_from_y = if handle.moves_top() {
+        start.h - dy
+    } else {
+        start.h + dy
+    };
+    let target_w = match (horizontal, vertical) {
+        // A corner follows whichever axis the pointer pulled further.
+        (true, true) => w_from_x.max(h_from_y / k),
+        (true, false) => w_from_x,
+        _ => h_from_y / k,
+    }
+    .max(MIN_FRAME);
+    // The anchored sides stay. An edge keeps the other axis centred.
+    let sized = |w: f32| {
+        let h = w * k;
+        let x = if handle.moves_left() {
+            right - w
+        } else if handle.moves_right() {
+            left
+        } else {
+            left + start.w * 0.5 - w * 0.5
+        };
+        let y = if handle.moves_top() {
+            bottom - h
+        } else if handle.moves_bottom() {
+            top
+        } else {
+            top + start.h * 0.5 - h * 0.5
+        };
+        Frame { x, y, w, h }
+    };
+    space.furthest(|t| sized(lerp(start.w, target_w, t)))
 }
 
 #[cfg(test)]
@@ -1246,12 +1749,87 @@ mod tests {
             }
         }
         let image = Image::new(w, h, rgb);
-        let out = shadows_highlights(&image, 100.0, -100.0);
+        let clipped = clip_mask(&image);
+        let out = shadows_highlights(image, &clipped, 100.0, -100.0, 1.0);
         let grey = out.pixel(w / 4, h / 2)[0];
         assert!((grey - 0.18).abs() < 2.0e-3, "mid grey moved to {grey}");
         // No bright line on the dark side next to the step.
         let near = out.pixel(w / 2 - 2, h / 2)[0];
         assert!(near < 0.2, "halo on the dark side: {near}");
+    }
+
+    fn grey_image(w: u32, h: u32, f: impl Fn(u32, u32) -> f32) -> Image {
+        let mut rgb = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = f(x, y);
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+        }
+        Image::new(w, h, rgb)
+    }
+
+    #[test]
+    fn clarity_lifts_texture_and_leaves_a_hard_edge_alone() {
+        let texture = grey_image(128, 128, |x, _| 0.5 + 0.02 * (x as f32 * 0.4).sin());
+        let same = clarity(&texture, 0.0, 1.0);
+        let worst = same
+            .rgb
+            .iter()
+            .zip(&texture.rgb)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1.0e-4, "clarity 0 moved a pixel by {worst}");
+
+        let amplitude = |image: &Image| {
+            let row: Vec<f32> = (32..96).map(|x| image.pixel(x, 64)[0]).collect();
+            row.iter().cloned().fold(f32::MIN, f32::max) - row.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let lifted = clarity(&texture, 100.0, 1.0);
+        assert!(amplitude(&lifted) > 1.3 * amplitude(&texture), "texture not lifted");
+
+        let edge = grey_image(128, 128, |x, _| if x < 64 { 0.1 } else { 0.9 });
+        let out = clarity(&edge, 100.0, 1.0);
+        let (low, high) = out
+            .rgb
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        assert!(low > 0.08 && high < 0.92, "halo at the edge: {low} to {high}");
+    }
+
+    #[test]
+    fn a_clipped_blue_comes_back_from_its_neighbours() {
+        // Left: blue sky, b / g = 1.8. Middle: brighter sky with blue clipped
+        // in the file. Right: a white disk with all three clipped.
+        let (w, h) = (96u32, 32u32);
+        let mut rgb = Vec::new();
+        for _y in 0..h {
+            for x in 0..w {
+                let px = if x < 32 {
+                    [0.3, 0.5, 0.9]
+                } else if x < 80 {
+                    [0.4, 0.6, 1.0]
+                } else {
+                    [1.0, 1.0, 1.0]
+                };
+                rgb.extend_from_slice(&px);
+            }
+        }
+        let mut image = Image::new(w, h, rgb);
+        let clipped = clip_mask(&image);
+        repair_clipped(&mut image, &clipped, 16);
+        let near = image.pixel(36, 16);
+        assert!((near[2] - 1.08).abs() < 1.0e-3, "blue not rebuilt: {near:?}");
+        assert_eq!((near[0], near[1]), (0.4, 0.6));
+        // Tiles 3 to 5 hold no unclipped blue: nothing to copy.
+        assert_eq!(image.pixel(70, 16)[2], 1.0);
+        assert_eq!(image.pixel(90, 16), [1.0, 1.0, 1.0]);
+        // Nothing clipped: the stage leaves the picture alone.
+        let mut plain = flat(8, 8, [0.2, 0.3, 0.4]);
+        let before = plain.rgb.clone();
+        let mask = clip_mask(&plain);
+        repair_clipped(&mut plain, &mask, 16);
+        assert_eq!(plain.rgb, before);
     }
 
     #[test]
@@ -1295,13 +1873,147 @@ mod tests {
 
     #[test]
     fn rotation_frame_does_not_sample_an_empty_corner() {
-        let mut rgb = vec![0.2; 8 * 8 * 3];
-        rgb[0] = 1.0;
-        let image = Image::new(8, 8, rgb);
-        let frame = fit_aspect(Aspect::R1x1, 20.0, 8.0, 8.0);
-        let out = resample_frame(&image, 20.0, frame);
-        for px in out.rgb.chunks_exact(3) {
-            assert!(px[0] > 0.05, "empty corner leaked into the frame: {px:?}");
+        for (w, h, deg) in [(80u32, 60u32, 10.0f32), (80, 60, 30.0), (60, 80, -25.0), (64, 64, 45.0)] {
+            let image = flat(w, h, [0.2, 0.2, 0.2]);
+            let out = crop_frame(&image, deg, Frame::default());
+            for px in out.rgb.chunks_exact(3) {
+                assert!((px[0] - 0.2).abs() < 1.0e-3, "{w}x{h} at {deg}°: {px:?}");
+            }
         }
+    }
+
+    /// Turns a canvas point (pixel edges) clockwise about the centre: where
+    /// that point of the upright output came from in the photo.
+    fn source_of(w: f32, h: f32, theta: f32, x: f32, y: f32) -> (f32, f32) {
+        let (dx, dy) = (x - w * 0.5, y - h * 0.5);
+        (
+            theta.cos() * dx - theta.sin() * dy + w * 0.5,
+            theta.sin() * dx + theta.cos() * dy + h * 0.5,
+        )
+    }
+
+    #[test]
+    fn usable_rect_matches_the_closed_form_and_touches_the_photo() {
+        // 4:3 at 10°: all four sides touch. At 30°: limited by the short side.
+        let (_, _, uw, uh) = usable_rect(400.0, 300.0, 10f32.to_radians());
+        assert!((uw - 363.7).abs() < 0.5 && (uh - 240.4).abs() < 0.5, "{uw} {uh}");
+        let (_, _, uw, uh) = usable_rect(400.0, 300.0, 30f32.to_radians());
+        assert!((uw - 300.0).abs() < 0.5 && (uh - 173.2).abs() < 0.5, "{uw} {uh}");
+        for deg in [5.0f32, 10.0, 30.0, -20.0, 45.0] {
+            let theta = deg.to_radians();
+            let (x, y, w, h) = usable_rect(400.0, 300.0, theta);
+            let mut slack = f32::MAX;
+            for (cx, cy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                let (sx, sy) = source_of(400.0, 300.0, theta, cx, cy);
+                assert!(sx > -0.01 && sy > -0.01 && sx < 400.01 && sy < 300.01, "{deg}° corner outside");
+                slack = slack.min(sx).min(sy).min(400.0 - sx).min(300.0 - sy);
+            }
+            // At least one corner is on the photo's border: the snap line.
+            assert!(slack < 0.05, "{deg}°: rectangle stops {slack} px short");
+        }
+    }
+
+    #[test]
+    fn positive_rotation_turns_counterclockwise() {
+        // A dot right of centre moves up under a counterclockwise turn.
+        let (w, h) = (101u32, 101u32);
+        let mut rgb = vec![0.0; (w * h * 3) as usize];
+        let i = ((50 * w + 80) * 3) as usize;
+        rgb[i..i + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+        let image = Image::new(w, h, rgb);
+        let out = rotate_canvas(&image, 90.0);
+        let brightest = out
+            .rgb
+            .chunks_exact(3)
+            .enumerate()
+            .max_by(|a, b| a.1[0].total_cmp(&b.1[0]))
+            .map(|(index, _)| (index as u32 % out.width, index as u32 / out.width))
+            .unwrap();
+        assert_eq!((out.width, out.height), (w, h));
+        assert_eq!(brightest, (50, 20));
+    }
+
+    #[test]
+    fn the_turned_photo_keeps_its_corners_on_screen() {
+        let image = flat(80, 40, [0.5, 0.5, 0.5]);
+        let out = rotate_canvas(&image, 20.0);
+        assert_eq!((out.width, out.height), rotated_bounds(80, 40, 20.0));
+        assert!(out.width > 80 && out.height > 40);
+        // Total light is the photo's: nothing was cut off at the sides.
+        let total: f32 = out.rgb.iter().step_by(3).sum();
+        assert!((total - 0.5 * 80.0 * 40.0).abs() < 0.02 * 0.5 * 80.0 * 40.0, "{total}");
+        // The usable rectangle sits at the centre of the box.
+        let [x, y, w, h] = usable_fraction(80, 40, 20.0);
+        assert!((x + w * 0.5 - 0.5).abs() < 1.0e-4 && (y + h * 0.5 - 0.5).abs() < 1.0e-4);
+        assert_eq!(usable_fraction(80, 40, 0.0), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_crop_at_zero_degrees_copies_pixels_exactly() {
+        let rgb: Vec<f32> = (0..20 * 10 * 3).map(|i| (i % 97) as f32 / 97.0).collect();
+        let image = Image::new(20, 10, rgb);
+        let frame = Frame { x: 0.25, y: 0.2, w: 0.5, h: 0.5 };
+        let out = crop_frame(&image, 0.0, frame);
+        assert_eq!((out.width, out.height), (10, 5));
+        assert_eq!(out.pixel(0, 0), image.pixel(5, 2));
+        assert_eq!(out.pixel(9, 4), image.pixel(14, 6));
+    }
+
+    #[test]
+    fn dragging_an_edge_outward_stops_on_the_border() {
+        let start = Frame { x: 0.2, y: 0.2, w: 0.5, h: 0.5 };
+        let out = drag_frame(start, Handle::Right, 0.9, 0.0, Aspect::Free, 0.0, 400.0, 300.0);
+        assert!((out.x + out.w - 1.0).abs() < 1.0e-4 && out.x == 0.2, "{out:?}");
+        let out = drag_frame(start, Handle::TopLeft, -0.5, -0.5, Aspect::Free, 0.0, 400.0, 300.0);
+        assert!(out.x.abs() < 1.0e-4 && out.y.abs() < 1.0e-4, "{out:?}");
+        assert!((out.w - 0.7).abs() < 1.0e-4 && (out.h - 0.7).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_turned_photo_lets_the_frame_reach_past_the_usable_rectangle() {
+        // At 10°, the photo stands above the usable rectangle at its middle
+        // and reaches past it at the sides halfway down.
+        let space = FrameSpace::new(10.0, 400.0, 300.0);
+        let narrow = Frame { x: 0.45, y: 0.2, w: 0.1, h: 0.6 };
+        let up = drag_frame(narrow, Handle::Top, 0.0, -1.0, Aspect::Free, 10.0, 400.0, 300.0);
+        assert!(up.y < -0.02, "the top edge stayed on the usable rectangle: {up:?}");
+        assert!(space.fits(up));
+        // It stopped on the border: a little further is off the photo.
+        assert!(!space.fits(Frame { y: up.y - 0.002, h: up.h + 0.002, ..up }));
+
+        let small = Frame { x: 0.4, y: 0.45, w: 0.1, h: 0.1 };
+        let left = drag_frame(small, Handle::Move, -1.0, 0.0, Aspect::Free, 10.0, 400.0, 300.0);
+        assert!(left.x < -0.01 && space.fits(left), "{left:?}");
+        assert_eq!((left.w, left.h, left.y), (small.w, small.h, small.y));
+    }
+
+    #[test]
+    fn a_locked_ratio_holds_in_pixels_while_dragging() {
+        let (pw, ph) = (300.0, 200.0);
+        let start = fit_aspect(Aspect::R1x1, 0.0, pw, ph);
+        let out = drag_frame(start, Handle::BottomRight, -0.2, -0.05, Aspect::R1x1, 0.0, pw, ph);
+        assert!((out.w * pw - out.h * ph).abs() < 1.0e-3, "{out:?}");
+        assert!(out.x + out.w <= 1.0 + 1.0e-4 && out.y + out.h <= 1.0 + 1.0e-4);
+        let grown = drag_frame(out, Handle::Left, -2.0, 0.0, Aspect::R1x1, 0.0, pw, ph);
+        assert!((grown.w * pw - grown.h * ph).abs() < 1.0e-2 && grown.h <= 1.0 + 1.0e-4);
+        // Turned, the ratio still holds in pixels of the usable rectangle.
+        let space = FrameSpace::new(12.0, pw, ph);
+        let turned = drag_frame(start, Handle::TopRight, 1.0, -1.0, Aspect::R1x1, 12.0, pw, ph);
+        assert!(space.fits(turned));
+        assert!((turned.w * space.uw - turned.h * space.uh).abs() < 1.0e-2, "{turned:?}");
+    }
+
+    #[test]
+    fn a_frame_is_pulled_back_onto_the_photo_when_the_angle_grows() {
+        let frame = fit_aspect(Aspect::R1x1, 0.0, 400.0, 300.0);
+        let turned = clamp_frame_to_photo(frame, Aspect::R1x1, 20.0, 400.0, 300.0);
+        let space = FrameSpace::new(20.0, 400.0, 300.0);
+        assert!(space.fits(turned), "{turned:?}");
+        assert!((turned.w * space.uw - turned.h * space.uh).abs() < 1.0e-2, "{turned:?}");
+        // A full frame stays the full usable rectangle at any angle.
+        assert_eq!(
+            clamp_frame_to_photo(Frame::default(), Aspect::Free, 20.0, 400.0, 300.0),
+            Frame::default()
+        );
     }
 }

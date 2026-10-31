@@ -158,6 +158,17 @@ impl Track {
     }
 }
 
+/// One of the O / Of / S / Sf buttons. Each draws its own label.
+#[derive(Clone, Copy, Debug)]
+pub struct CompareButton {
+    pub text: &'static str,
+    pub rect: [f32; 4],
+    /// Top of the label's line.
+    pub top: f32,
+    pub enabled: bool,
+    pub held: bool,
+}
+
 pub struct Panel {
     pub x: f32,
     pub scale: f32,
@@ -166,6 +177,7 @@ pub struct Panel {
     pub tracks: Vec<Track>,
     /// Backgrounds for the button rows: x0, y0, x1, y1.
     pub buttons: Vec<[f32; 4]>,
+    pub compare: Vec<CompareButton>,
     pub text: String,
     pub text_top: f32,
     pub histogram: [f32; 4],
@@ -228,6 +240,8 @@ pub fn layout(
     split: f32,
     adj: &Adjustments,
     guide: Guide,
+    has_save: bool,
+    holding: Option<ImageControls>,
     confirm_exit: bool,
     copy_name: Option<&str>,
     message: Option<&str>,
@@ -285,17 +299,36 @@ pub fn layout(
     b.lines.push(String::new());
     b.y += b.row_h;
     b.slider(Slider::Quality, adj);
-    b.lines.push("O    Of    S    Sf".into());
-    let compare = [
-        Hit::Compare(ImageControls::Original),
-        Hit::Compare(ImageControls::OriginalFramed),
-        Hit::Compare(ImageControls::Saved),
-        Hit::Compare(ImageControls::SavedFramed),
-    ];
-    let span = (x1 - x0) / 4.0;
-    for (index, hit) in compare.into_iter().enumerate() {
+    // The compare row has no text in the block: each button draws its label.
+    b.lines.push(String::new());
+    let gap = 4.0 * scale;
+    let inset = 2.0 * scale;
+    let span = (x1 - x0 + gap) / 4.0;
+    let mut compare = Vec::new();
+    for (index, (which, text)) in [
+        (ImageControls::Original, "O"),
+        (ImageControls::OriginalFramed, "Of"),
+        (ImageControls::Saved, "S"),
+        (ImageControls::SavedFramed, "Sf"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let left = x0 + span * index as f32;
-        b.rows.push((hit, left, left + span, b.y, b.y + b.row_h));
+        let right = left + span - gap;
+        // S and Sf need a save of the open file.
+        let enabled =
+            has_save || matches!(which, ImageControls::Original | ImageControls::OriginalFramed);
+        if enabled {
+            b.rows.push((Hit::Compare(which), left, right, b.y, b.y + b.row_h));
+        }
+        compare.push(CompareButton {
+            text,
+            rect: [left, b.y + inset, right, b.y + b.row_h - inset],
+            top: b.y,
+            enabled,
+            held: holding == Some(which),
+        });
     }
     b.y += b.row_h;
     if confirm_exit {
@@ -319,6 +352,7 @@ pub fn layout(
         rows: b.rows,
         tracks: b.tracks,
         buttons: b.buttons,
+        compare,
         text: b.lines.join("\n"),
         text_top,
         histogram,
@@ -362,24 +396,6 @@ pub fn hit_test(panel: &Panel, cursor_x: f32, cursor_y: f32) -> Option<Hit> {
     None
 }
 
-/// Screen rectangle of the frame inside the displayed picture.
-pub fn frame_screen(
-    pan_x: f32,
-    pan_y: f32,
-    image_w: f32,
-    image_h: f32,
-    scale: f32,
-    frame_x: f32,
-    frame_y: f32,
-    frame_w: f32,
-    frame_h: f32,
-) -> [f32; 4] {
-    let left = pan_x + frame_x * image_w * scale;
-    let top = pan_y + frame_y * image_h * scale;
-    let right = left + frame_w * image_w * scale;
-    let bottom = top + frame_h * image_h * scale;
-    [left, top, right, bottom]
-}
 
 #[cfg(test)]
 mod tests {
@@ -388,13 +404,29 @@ mod tests {
     #[test]
     fn tracks_sit_right_of_the_labels_and_map_both_ways() {
         let adj = Adjustments::defaults(90);
-        let panel = layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, None);
+        let panel = layout(
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None,
+        );
         let track = panel.track(Slider::Contrast).unwrap();
         assert!(track.x0 > panel.x + 100.0 && track.x1 < 1600.0);
         let mid = track.x_of(0.0);
         assert!((track.value_at(mid)).abs() < 1.0e-3);
         assert!((track.delta(track.x1 - track.x0) - 200.0).abs() < 1.0e-3);
         assert_eq!(panel.tracks.len(), 13);
+    }
+
+    #[test]
+    fn s_and_sf_wait_for_a_save() {
+        let adj = Adjustments::defaults(90);
+        let compare_hits = |has_save| {
+            layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, has_save, None, false, None, None)
+                .rows
+                .iter()
+                .filter(|row| matches!(row.0, Hit::Compare(_)))
+                .count()
+        };
+        assert_eq!(compare_hits(false), 2);
+        assert_eq!(compare_hits(true), 4);
     }
 
     #[test]

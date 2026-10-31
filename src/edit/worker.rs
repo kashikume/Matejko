@@ -7,7 +7,7 @@ use std::thread;
 
 use crate::edit::files::{save_copy, save_over, LoadedSession};
 use crate::edit::image::Image;
-use crate::edit::pipeline::{run, Adjustments, Frame, RunOptions};
+use crate::edit::pipeline::{run, usable_fraction, Adjustments, Frame, RunOptions};
 
 pub struct Rendered {
     pub generation: u64,
@@ -17,6 +17,13 @@ pub struct Rendered {
     pub height: u32,
     pub rgba: Vec<u8>,
     pub histogram: [Vec<u32>; 3],
+    /// The usable rectangle as fractions of the picture: left, top, width,
+    /// height. The frame is stored as fractions of this rectangle.
+    pub usable: [f32; 4],
+    /// The photo's long side in pixels of `rgba`. Holding the on-screen size
+    /// of this steady keeps the zoom when the preview, the full-size picture,
+    /// or a larger rotated box replace each other.
+    pub photo_long: f32,
 }
 
 pub enum SaveTarget {
@@ -174,7 +181,15 @@ fn render_picture(
             crop: false,
         },
     );
-    let histogram = histogram_of(&image, render.adjustments.frame);
+    // The photo before the turn, in the orientation the buttons chose.
+    let (photo_w, photo_h) = if render.adjustments.quarter_turns % 2 == 1 {
+        (source.height, source.width)
+    } else {
+        (source.width, source.height)
+    };
+    let usable = usable_fraction(photo_w, photo_h, render.adjustments.rotation);
+    let histogram = histogram_of(&image, usable, render.adjustments.frame);
+    let image_width = image.width;
     let display = if image.width > max_edge || image.height > max_edge {
         image.downsample_long_side(max_edge)
     } else {
@@ -187,18 +202,20 @@ fn render_picture(
         height: display.height,
         rgba: display.to_rgba8(true),
         histogram,
+        usable,
+        photo_long: photo_w.max(photo_h) as f32 * display.width as f32 / image_width as f32,
     }
 }
 
-/// Counts the part of the picture inside the frame.
-fn histogram_of(image: &Image, frame: Frame) -> [Vec<u32>; 3] {
-    let x0 = (frame.x * image.width as f32).floor().max(0.0) as u32;
-    let y0 = (frame.y * image.height as f32).floor().max(0.0) as u32;
-    let x1 = ((frame.x + frame.w) * image.width as f32)
-        .ceil()
-        .min(image.width as f32) as u32;
-    let y1 = ((frame.y + frame.h) * image.height as f32)
-        .ceil()
-        .min(image.height as f32) as u32;
+/// Counts the part of the picture inside the frame, which lies inside the
+/// usable rectangle, so no empty corner is counted.
+fn histogram_of(image: &Image, usable: [f32; 4], frame: Frame) -> [Vec<u32>; 3] {
+    let [ux, uy, uw, uh] = usable;
+    let w = image.width as f32;
+    let h = image.height as f32;
+    let x0 = ((ux + frame.x * uw) * w).ceil().max(0.0) as u32;
+    let y0 = ((uy + frame.y * uh) * h).ceil().max(0.0) as u32;
+    let x1 = ((ux + (frame.x + frame.w) * uw) * w).floor().min(w) as u32;
+    let y1 = ((uy + (frame.y + frame.h) * uh) * h).floor().min(h) as u32;
     image.histogram_region(x0, y0, x1.max(x0 + 1), y1.max(y0 + 1))
 }

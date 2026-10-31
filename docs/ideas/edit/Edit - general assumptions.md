@@ -207,7 +207,7 @@ The output sample is the baseline sample at `(sx, sy)`. There is no kernel. All 
 
 ### Horizon and frame
 
-Horizon and frame share one resample, after clarity. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. A source tap outside the oriented image is 0. θ = 0 and a full frame skip the resample: work is already the output. The horizon angle is not a place to turn the picture by 90°.
+Horizon and frame share one resample, after clarity. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. An output point that falls outside the oriented image is 0. A kernel tap past the edge repeats the edge pixel. θ = 0 and a full frame skip the resample: work is already the output. The horizon angle is not a place to turn the picture by 90°.
 
 ### Preview
 

@@ -65,6 +65,15 @@ pub struct ExtraQuad {
     pub color: [f32; 4],
 }
 
+/// A short line of text centred between `x0` and `x1`.
+pub struct Label<'a> {
+    pub text: &'a str,
+    pub x0: f32,
+    pub x1: f32,
+    pub top: f32,
+    pub color: [u8; 3],
+}
+
 pub struct Frame<'a> {
     pub image_width: f32,
     pub image_height: f32,
@@ -79,6 +88,7 @@ pub struct Frame<'a> {
     pub panel_text: Option<&'a str>,
     pub panel_left: f32,
     pub panel_top: f32,
+    pub labels: &'a [Label<'a>],
 }
 
 pub struct Gpu {
@@ -120,6 +130,7 @@ struct TextLayer {
     bar_laid_out: String,
     bar_laid_out_width: u32,
     bar_laid_out_scale: f32,
+    label_buffers: Vec<Buffer>,
 }
 
 impl Gpu {
@@ -460,6 +471,7 @@ impl Gpu {
             frame.panel_text,
             frame.panel_left,
             frame.panel_top,
+            frame.labels,
             self.config.width,
             self.config.height,
             frame.scale_factor,
@@ -541,6 +553,7 @@ impl TextLayer {
             bar_laid_out: String::new(),
             bar_laid_out_width: 0,
             bar_laid_out_scale: 0.0,
+            label_buffers: Vec::new(),
         }
     }
 
@@ -554,6 +567,7 @@ impl TextLayer {
         panel_text: Option<&str>,
         panel_left: f32,
         panel_top: f32,
+        labels: &[Label<'_>],
         width: u32,
         height: u32,
         scale_factor: f32,
@@ -625,7 +639,23 @@ impl TextLayer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        if text.is_none() && panel_text.is_none() && !has_bar {
+        while self.label_buffers.len() < labels.len() {
+            let buffer = Buffer::new(&mut self.font_system, Metrics::new(15.0, 22.0));
+            self.label_buffers.push(buffer);
+        }
+        for (label, buffer) in labels.iter().zip(&mut self.label_buffers) {
+            buffer.set_wrap(Wrap::None);
+            buffer.set_metrics_and_size(
+                Metrics::new(15.0 * scale, 22.0 * scale),
+                Some((label.x1 - label.x0).max(1.0)),
+                None,
+            );
+            let attrs = Attrs::new().family(Family::SansSerif);
+            buffer.set_text(label.text, &attrs, Shaping::Advanced, Some(Align::Center));
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        if text.is_none() && panel_text.is_none() && !has_bar && labels.is_empty() {
             return false;
         }
 
@@ -674,6 +704,18 @@ impl TextLayer {
                 scale: 1.0,
                 bounds,
                 default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+        }
+        for (label, buffer) in labels.iter().zip(&self.label_buffers) {
+            let [r, g, b] = label.color;
+            areas.push(TextArea {
+                buffer,
+                left: label.x0,
+                top: label.top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(r, g, b),
                 custom_glyphs: &[],
             });
         }

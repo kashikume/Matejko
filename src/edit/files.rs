@@ -1,7 +1,11 @@
 //! Baseline copy, adjustment JSON, and the JPEG writer.
 
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
+
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,19 +43,20 @@ impl SessionPaths {
         }
     }
 
-    pub fn for_copy(open: &Path, copy_name: &str) -> Self {
-        let folder = open.parent().unwrap_or(Path::new("."));
+    /// A new version beside `session`. It shares the session's baseline,
+    /// which may belong to an earlier file than the one that is open.
+    pub fn for_copy(session: &SessionPaths, copy_name: &str) -> Self {
+        let folder = session.open.parent().unwrap_or(Path::new("."));
         let copy = folder.join(copy_name);
         let stem = Path::new(copy_name)
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| "image".into());
-        let original = SessionPaths::for_open(open);
         Self {
             open: copy,
-            baseline: original.baseline,
+            baseline: session.baseline.clone(),
             adj: folder.join(".matejko").join(format!("{stem}.matejko_adj")),
-            original_name: original.original_name,
+            original_name: session.original_name.clone(),
         }
     }
 }
@@ -236,7 +241,7 @@ pub fn save_copy(
     copy_name: &str,
     adjustments: &Adjustments,
 ) -> Result<PathBuf, String> {
-    let paths = SessionPaths::for_copy(&session.paths.open, copy_name);
+    let paths = SessionPaths::for_copy(&session.paths, copy_name);
     if let Some(parent) = paths.baseline.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -299,9 +304,22 @@ fn write_render(
     Ok(())
 }
 
+/// Decodes with EXIF orientation applied, as the viewer does, so the
+/// baseline is upright. The rendered file is written with orientation 1.
 pub fn decode_jpeg_linear(bytes: &[u8]) -> Result<Image, String> {
-    let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
-    let rgba = image.to_rgba8();
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|err| err.to_string())?
+        .into_decoder()
+        .map_err(|err| format!("Couldn't decode this file. {err}"))?;
+    decoder
+        .set_limits(Limits::no_limits())
+        .map_err(|err| err.to_string())?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)
+        .map_err(|err| format!("Couldn't decode this file. {err}"))?;
+    image.apply_orientation(orientation);
+    let rgba = image.into_rgba8();
     Ok(Image::from_srgb_rgba(rgba.width(), rgba.height(), rgba.as_raw()))
 }
 
@@ -637,8 +655,6 @@ fn _decode_used(c: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-
     use image::codecs::jpeg::JpegEncoder;
     use image::{ExtendedColorType, ImageEncoder};
 
@@ -711,6 +727,50 @@ mod tests {
             .write_image(&[10, 20, 30], 1, 1, ExtendedColorType::Rgb8)
             .unwrap();
         assert_eq!(estimate_jpeg_quality(&jpeg), Some(85));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("matejko-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_baseline_is_decoded_upright() {
+        // 4 × 2 pixels stored, orientation 6: upright it is 2 × 4.
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .write_image(&[128; 4 * 2 * 3], 4, 2, ExtendedColorType::Rgb8)
+            .unwrap();
+        let image = decode_jpeg_linear(&inject_exif(&jpeg)).unwrap();
+        assert_eq!((image.width, image.height), (2, 4));
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_shares_the_one_baseline() {
+        let dir = temp_dir("copies");
+        let path = dir.join("photo.jpg");
+        fs::write(&path, tagged_jpeg()).unwrap();
+        let mut changed = load_session(&path).unwrap().adjustments;
+        changed.exposure_ev = 0.5;
+        save_copy(&load_session(&path).unwrap(), "photo_v2.jpg", &changed).unwrap();
+        let second = load_session(&dir.join("photo_v2.jpg")).unwrap();
+        assert_eq!(second.paths.original_name, "photo.jpg");
+        save_copy(&second, "photo_v3.jpg", &changed).unwrap();
+        let mut jpegs: Vec<String> = fs::read_dir(dir.join(".matejko"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".jpg"))
+            .collect();
+        jpegs.sort();
+        assert_eq!(jpegs, ["photo.jpg"]);
+        let third = AdjFile::parse(
+            &fs::read_to_string(dir.join(".matejko").join("photo_v3.matejko_adj")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(third.original, "photo.jpg");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

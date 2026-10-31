@@ -75,7 +75,7 @@ Applying `r` once to the pixels is a global curve and is not this filter. The lo
 3. For each `γ_j`, remap every pixel with `r` using `g = γ_j`, and build the Laplacian pyramid of that remapped image.
 4. For each output coefficient at level `ℓ` and pixel `p`, read `g = G_ℓ(p)`, find the two reference levels around it, and linearly interpolate the precomputed Laplacian coefficients.
 5. Collapse the pyramid to `L′`.
-6. Recombine `L′` with the original chroma.
+6. Recombine `L′` with the original chroma: each channel takes the same offset, `C′ = C + (L′ − L)`. The differences `C − L` are the chroma, and they are kept. Scaling the channels by `L′ / L` instead multiplies chroma in near-black pixels, where `L` is tiny.
 
 Step 4 is the whole trick. The gain at a pixel depends on that pixel's own neighborhood, so a leaf and the sky behind it do not share a curve. Sampling every standard deviation of the remap kernel is the recommendation in the 2014 paper. Against the exact per-coefficient remap, that approximation stays above about 30 dB, which is invisible, and the cost is linear in the pixel count times the number of reference levels.
 

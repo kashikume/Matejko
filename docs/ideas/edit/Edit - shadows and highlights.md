@@ -67,6 +67,10 @@ k = j · median(k / j)
 
 A pixel with R, G, and B all at C has nothing to copy. It stays clipped. That is the specular the help leaves alone. The neighborhood starts at 32 px and is internal.
 
+On a JPEG the ceiling is in the file, not in a sensor. A channel counts as clipped when its code is 254 or 255. That is read on the oriented image before White balance, Exposure, and Blackpoint move the values. The ratios are then taken on the values those stages wrote. A rebuilt channel never ends below the value it was clipped at: the true value was at least that.
+
+The medians are taken per 16 px tile, over that tile and its eight neighbors, which reaches about 32 px either side. Every second pixel in each direction is enough for a median. A preview scales the tile with its width.
+
 ### Edge-aware base
 
 ```
