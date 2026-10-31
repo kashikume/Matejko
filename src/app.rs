@@ -973,6 +973,62 @@ impl App {
         ))
     }
 
+    /// The dimmed margin, the frame outline, and the guides. They belong to
+    /// the picture, so they stop at the divider and the panel covers them.
+    fn edit_picture_quads(&self, editing: &Editing, panel_x: f32) -> Vec<ExtraQuad> {
+        let mut quads = Vec::new();
+        let mut quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]| {
+            let x1 = x1.min(panel_x);
+            if x1 > x0 {
+                quads.push(ExtraQuad { x0, y0, x1, y1, color });
+            }
+        };
+        if let Some((photo, _, screen)) = self.edit_rects() {
+            // The margin outside the frame is dimmed, and so are the empty
+            // corners the rotation left, which always lie outside it.
+            let dim = [0.0, 0.0, 0.0, 0.55];
+            quad(photo[0], photo[1], photo[2], screen[1], dim);
+            quad(photo[0], screen[3], photo[2], photo[3], dim);
+            quad(photo[0], screen[1], screen[0], screen[3], dim);
+            quad(screen[2], screen[1], photo[2], screen[3], dim);
+            let edge = [1.0, 1.0, 1.0, 0.6];
+            quad(screen[0], screen[1], screen[2], screen[1] + 1.0, edge);
+            quad(screen[0], screen[3] - 1.0, screen[2], screen[3], edge);
+            quad(screen[0], screen[1], screen[0] + 1.0, screen[3], edge);
+            quad(screen[2] - 1.0, screen[1], screen[2], screen[3], edge);
+            let guide = [1.0, 1.0, 1.0, 0.85];
+            match editing.guide {
+                Guide::Thirds => {
+                    for t in [1.0 / 3.0, 2.0 / 3.0] {
+                        let x = screen[0] + (screen[2] - screen[0]) * t;
+                        let y = screen[1] + (screen[3] - screen[1]) * t;
+                        quad(x, screen[1], x + 1.0, screen[3], guide);
+                        quad(screen[0], y, screen[2], y + 1.0, guide);
+                    }
+                }
+                Guide::Center => {
+                    let x = (screen[0] + screen[2]) * 0.5;
+                    let y = (screen[1] + screen[3]) * 0.5;
+                    quad(x, screen[1], x + 1.0, screen[3], guide);
+                    quad(screen[0], y, screen[2], y + 1.0, guide);
+                }
+                Guide::Pointer
+                    if self.cursor_valid
+                        && self.cursor.x < panel_x
+                        && self.cursor.x >= photo[0]
+                        && self.cursor.x <= photo[2]
+                        && self.cursor.y >= photo[1]
+                        && self.cursor.y <= photo[3] =>
+                {
+                    quad(self.cursor.x, photo[1], self.cursor.x + 1.0, photo[3], guide);
+                    quad(photo[0], self.cursor.y, photo[2], self.cursor.y + 1.0, guide);
+                }
+                Guide::None | Guide::Pointer => {}
+            }
+        }
+        quads
+    }
+
     fn edit_quads(&self) -> Vec<ExtraQuad> {
         let Some(editing) = self.editing.as_ref() else {
             return Vec::new();
@@ -980,7 +1036,8 @@ impl App {
         let Some(panel) = self.edit_panel() else {
             return Vec::new();
         };
-        let mut quads = Vec::new();
+        // The picture's overlays first: the panel is drawn over them.
+        let mut quads = self.edit_picture_quads(editing, panel.x);
         let mut quad = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]| {
             quads.push(ExtraQuad { x0, y0, x1, y1, color });
         };
@@ -1076,48 +1133,6 @@ impl App {
             if let Some([x0, y0, x1, y1]) = panel.row_rect(hit) {
                 let inset = 2.0 * s;
                 quad(x0, y0 + inset, x1, y1 - inset, [1.0, 1.0, 1.0, 0.12]);
-            }
-        }
-        if let Some((photo, _, screen)) = self.edit_rects() {
-            // The margin outside the frame is dimmed, and so are the empty
-            // corners the rotation left, which always lie outside it.
-            let dim = [0.0, 0.0, 0.0, 0.55];
-            quad(photo[0], photo[1], photo[2], screen[1], dim);
-            quad(photo[0], screen[3], photo[2], photo[3], dim);
-            quad(photo[0], screen[1], screen[0], screen[3], dim);
-            quad(screen[2], screen[1], photo[2], screen[3], dim);
-            let edge = [1.0, 1.0, 1.0, 0.6];
-            quad(screen[0], screen[1], screen[2], screen[1] + 1.0, edge);
-            quad(screen[0], screen[3] - 1.0, screen[2], screen[3], edge);
-            quad(screen[0], screen[1], screen[0] + 1.0, screen[3], edge);
-            quad(screen[2] - 1.0, screen[1], screen[2], screen[3], edge);
-            let guide = [1.0, 1.0, 1.0, 0.85];
-            match editing.guide {
-                Guide::Thirds => {
-                    for t in [1.0 / 3.0, 2.0 / 3.0] {
-                        let x = screen[0] + (screen[2] - screen[0]) * t;
-                        let y = screen[1] + (screen[3] - screen[1]) * t;
-                        quad(x, screen[1], x + 1.0, screen[3], guide);
-                        quad(screen[0], y, screen[2], y + 1.0, guide);
-                    }
-                }
-                Guide::Center => {
-                    let x = (screen[0] + screen[2]) * 0.5;
-                    let y = (screen[1] + screen[3]) * 0.5;
-                    quad(x, screen[1], x + 1.0, screen[3], guide);
-                    quad(screen[0], y, screen[2], y + 1.0, guide);
-                }
-                Guide::Pointer
-                    if self.cursor_valid
-                        && self.cursor.x >= photo[0]
-                        && self.cursor.x <= photo[2]
-                        && self.cursor.y >= photo[1]
-                        && self.cursor.y <= photo[3] =>
-                {
-                    quad(self.cursor.x, photo[1], self.cursor.x + 1.0, photo[3], guide);
-                    quad(photo[0], self.cursor.y, photo[2], self.cursor.y + 1.0, guide);
-                }
-                Guide::None | Guide::Pointer => {}
             }
         }
         quads
@@ -1455,6 +1470,11 @@ impl App {
     fn frame_handle_at(&self, cursor: Vec2) -> Option<Handle> {
         let editing = self.editing.as_ref()?;
         if self.shift_down || editing.holding.is_some() {
+            return None;
+        }
+        // The panel covers the picture. What lies under it is out of reach.
+        let panel = self.edit_panel()?;
+        if cursor.x >= panel.x - 6.0 * panel.scale {
             return None;
         }
         let (_, _, [left, top, right, bottom]) = self.edit_rects()?;
