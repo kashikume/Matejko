@@ -149,12 +149,34 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
     }
 }
 
+/// The CPU architecture the exe was built for, as Windows names it.
+#[cfg(target_arch = "x86_64")]
+macro_rules! platform {
+    () => {
+        "x64"
+    };
+}
+#[cfg(target_arch = "aarch64")]
+macro_rules! platform {
+    () => {
+        "arm64"
+    };
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+macro_rules! platform {
+    () => {
+        std::env::consts::ARCH
+    };
+}
+
 /// One row per line: the key, a tab, then what it does. The overlay lines the
 /// rows up on the dash between the two, and centers a line with no tab.
 const HELP_TEXT: &str = concat!(
     "Matejko ",
     env!("CARGO_PKG_VERSION"),
-    "
+    " (",
+    platform!(),
+    ")
 
 Left / Right\tprevious or next file
 Home / End\tfirst or last file
@@ -314,6 +336,9 @@ enum EditPointer {
 
 pub struct App {
     catalog: Catalog,
+    /// Started without a file: the catalog holds only the built-in how-to
+    /// image, so only viewing commands apply.
+    welcome: bool,
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -354,9 +379,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(catalog: Catalog, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(catalog: Catalog, welcome: bool, proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             catalog,
+            welcome,
             proxy,
             window: None,
             gpu: None,
@@ -403,10 +429,18 @@ impl App {
         }
     }
 
+    fn title(&self) -> String {
+        if self.welcome {
+            "Matejko — right-click a photo and choose Open with".into()
+        } else {
+            self.catalog.title()
+        }
+    }
+
     fn refresh_title(&self) {
         if let Some(window) = &self.window {
             if !self.catalog.is_empty() {
-                window.set_title(&self.catalog.title());
+                window.set_title(&self.title());
             }
         }
     }
@@ -430,7 +464,19 @@ impl App {
     }
 
     fn on_command(&mut self, event_loop: &ActiveEventLoop, command: Command, repeat: bool) {
-        match action_for(command, self.mode(), repeat) {
+        let action = match action_for(command, self.mode(), repeat) {
+            Action::AskDelete
+            | Action::ShowInfo
+            | Action::OpenWith
+            | Action::OpenMap
+            | Action::EnterEdit
+                if self.welcome =>
+            {
+                Action::None
+            }
+            action => action,
+        };
+        match action {
             Action::None => {}
             Action::Previous => self.shift(-1),
             Action::Next => self.shift(1),
@@ -1940,7 +1986,7 @@ impl ApplicationHandler<UserEvent> for App {
         let (position, size) = initial_placement(event_loop);
         let icon = app_icon();
         let attributes = Window::default_attributes()
-            .with_title(self.catalog.title())
+            .with_title(self.title())
             .with_inner_size(size)
             .with_position(position)
             .with_resizable(true)

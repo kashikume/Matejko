@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Matejko installer (WiX 3). Built by scripts/build-release.ps1, which passes
+  Version, X64Exe, Arm64Exe, Icon, and License.
+
+  One x64 package carries both exes and installs only the one that matches
+  the machine, always as matejko.exe. The user picks "just me" (no admin,
+  %LocalAppData%\Programs\Matejko) or "everyone" (C:\Program Files\Matejko).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Matejko"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="kashikume"
+           UpgradeCode="37D98C70-BF3B-4975-83C0-11C87A89482D">
+    <Package InstallerVersion="500" Compressed="yes" Platform="x64"
+             Description="Matejko photo viewer" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Matejko is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="matejko.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="matejko.ico" />
+
+    <!-- Dual-purpose package: per-user by default, per-machine on request. -->
+    <Property Id="ALLUSERS" Value="2" />
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+    <Property Id="ApplicationFolderName" Value="Matejko" />
+    <Property Id="WixAppFolder" Value="WixPerUserFolder" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.License)" />
+    <UIRef Id="WixUI_Advanced" />
+
+    <!-- WixUI_Advanced defaults to Program Files (x86) and %LocalAppData%\Apps.
+         Point them at Program Files and %LocalAppData%\Programs instead. -->
+    <CustomAction Id="SetPerMachineFolder" Property="WixPerMachineFolder"
+                  Value="[ProgramFiles64Folder][ApplicationFolderName]" Execute="immediate" />
+    <CustomAction Id="SetPerUserFolder" Property="WixPerUserFolder"
+                  Value="[LocalAppDataFolder]Programs\[ApplicationFolderName]" Execute="immediate" />
+    <InstallUISequence>
+      <Custom Action="SetPerMachineFolder" After="WixSetDefaultPerMachineFolder" />
+      <Custom Action="SetPerUserFolder" After="WixSetDefaultPerUserFolder" />
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="SetPerMachineFolder" After="WixSetDefaultPerMachineFolder" />
+      <Custom Action="SetPerUserFolder" After="WixSetDefaultPerUserFolder" />
+    </InstallExecuteSequence>
+
+    <!-- The machine's own architecture, also when the installer runs emulated. -->
+    <Property Id="NATIVEARCH">
+      <RegistrySearch Id="NativeArch" Root="HKLM" Type="raw" Win64="yes"
+                      Key="SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+                      Name="PROCESSOR_ARCHITECTURE" />
+    </Property>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="APPLICATIONFOLDER" Name="Matejko" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <!-- Exactly one of these two conditions is true. -->
+    <DirectoryRef Id="APPLICATIONFOLDER">
+      <Component Id="ExeArm64" Guid="681F9A4A-379B-4F21-9FDD-1EA79A26EFAE" Win64="yes">
+        <Condition><![CDATA[NATIVEARCH = "ARM64"]]></Condition>
+        <File Id="MatejkoArm64" Name="matejko.exe" Source="$(var.Arm64Exe)" KeyPath="yes" />
+      </Component>
+      <Component Id="ExeX64" Guid="A3D6BE47-CD62-42B0-B53B-75E958DE7381" Win64="yes">
+        <Condition><![CDATA[NOT (NATIVEARCH = "ARM64")]]></Condition>
+        <File Id="MatejkoX64" Name="matejko.exe" Source="$(var.X64Exe)" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Lists Matejko under Open with for its file types and in Settings >
+         Default apps. HKMU is HKCU for a per-user install, HKLM per machine. -->
+    <DirectoryRef Id="APPLICATIONFOLDER">
+      <Component Id="FileAssociations" Guid="97DA013F-7FF8-4477-9DB5-BF89F3334837" Win64="yes">
+        <RegistryValue Root="HKMU" Key="Software\Matejko" Name="FileAssociations"
+                       Type="integer" Value="1" KeyPath="yes" />
+
+        <RegistryKey Root="HKMU" Key="Software\Classes\Applications\matejko.exe">
+          <RegistryValue Name="FriendlyAppName" Type="string" Value="Matejko" />
+          <RegistryValue Key="DefaultIcon" Type="string" Value="&quot;[APPLICATIONFOLDER]matejko.exe&quot;,0" />
+          <RegistryValue Key="shell\open\command" Type="string"
+                         Value="&quot;[APPLICATIONFOLDER]matejko.exe&quot; &quot;%1&quot;" />
+          <RegistryValue Key="SupportedTypes" Name=".jpg" Type="string" Value="" />
+          <RegistryValue Key="SupportedTypes" Name=".jpeg" Type="string" Value="" />
+          <RegistryValue Key="SupportedTypes" Name=".png" Type="string" Value="" />
+          <RegistryValue Key="SupportedTypes" Name=".mp4" Type="string" Value="" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKMU" Key="Software\Classes\Matejko.File">
+          <RegistryValue Type="string" Value="Matejko file" />
+          <RegistryValue Name="FriendlyTypeName" Type="string" Value="Matejko file" />
+          <RegistryValue Key="DefaultIcon" Type="string" Value="&quot;[APPLICATIONFOLDER]matejko.exe&quot;,0" />
+          <RegistryValue Key="shell\open" Name="FriendlyAppName" Type="string" Value="Matejko" />
+          <RegistryValue Key="shell\open\command" Type="string"
+                         Value="&quot;[APPLICATIONFOLDER]matejko.exe&quot; &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryValue Root="HKMU" Key="Software\Classes\.jpg\OpenWithProgids" Name="Matejko.File" Type="string" Value="" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.jpeg\OpenWithProgids" Name="Matejko.File" Type="string" Value="" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.png\OpenWithProgids" Name="Matejko.File" Type="string" Value="" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.mp4\OpenWithProgids" Name="Matejko.File" Type="string" Value="" />
+
+        <RegistryKey Root="HKMU" Key="Software\Matejko\Capabilities">
+          <RegistryValue Name="ApplicationName" Type="string" Value="Matejko" />
+          <RegistryValue Name="ApplicationDescription" Type="string" Value="A small photo viewer for Windows" />
+          <RegistryValue Key="FileAssociations" Name=".jpg" Type="string" Value="Matejko.File" />
+          <RegistryValue Key="FileAssociations" Name=".jpeg" Type="string" Value="Matejko.File" />
+          <RegistryValue Key="FileAssociations" Name=".png" Type="string" Value="Matejko.File" />
+          <RegistryValue Key="FileAssociations" Name=".mp4" Type="string" Value="Matejko.File" />
+        </RegistryKey>
+        <RegistryValue Root="HKMU" Key="Software\RegisteredApplications" Name="Matejko"
+                       Type="string" Value="Software\Matejko\Capabilities" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="5A66D61D-0916-4068-9508-A72BD7E8E015" Win64="yes">
+        <Shortcut Id="MatejkoShortcut" Name="Matejko" Description="Photo viewer"
+                  Target="[APPLICATIONFOLDER]matejko.exe" WorkingDirectory="APPLICATIONFOLDER" />
+        <RegistryValue Root="HKMU" Key="Software\Matejko" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="Matejko" Level="1">
+      <ComponentRef Id="ExeArm64" />
+      <ComponentRef Id="ExeX64" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="FileAssociations" />
+    </Feature>
+  </Product>
+</Wix>

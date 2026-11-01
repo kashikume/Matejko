@@ -57,7 +57,8 @@ The wheel zooms in and out, keeping the image point under the pointer fixed. Dra
 
 - Extensions are `.jpg`, `.jpeg`, `.png`, and `.mp4`, compared case-insensitively.
 - The path may be relative to the working directory. The app canonicalizes it when the filesystem allows, then lists that directory.
-- Exactly one argument is required, and it must be a JPEG, PNG, or MP4 file. Zero arguments, extra arguments, a missing file, a directory, or a different extension is a fatal error: a message box and exit code 1.
+- At most one argument is accepted, and it must be a JPEG, PNG, or MP4 file. Extra arguments, a missing file, a directory, or a different extension is a fatal error: a message box and exit code 1.
+- With no argument, for example when started from the Start Menu, the app shows a built-in image explaining how to open a photo with Open with. The image is embedded in the exe and written to `%TEMP%\matejko-welcome\welcome.png` at startup. The title reads `Matejko — right-click a photo and choose Open with`. Zoom, pan, fullscreen, F1, and Escape work. Delete, I, O, M, and E do nothing.
 - Files that fail to decode stay in the list. The window shows the file name and the error, and Left and Right still work.
 - The list is built once at startup. Deleting a file removes it from the list. External additions are ignored.
 
@@ -115,7 +116,7 @@ Mouse wheel and drag keep working during help, info, and delete confirmation, so
 
 ### Help
 
-F1 dims the picture and draws the app name and version above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
+F1 dims the picture and draws the app name, version, and platform (`Matejko 0.1.0 (arm64)` or `(x64)`) above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
 
 ### Information
 
@@ -181,7 +182,7 @@ Crates:
 
 ### Modules
 
-- `main` — arguments, fatal errors, process exit.
+- `main` — arguments, the welcome image, fatal errors, process exit.
 - `catalog` — directory listing, sort, index after delete.
 - `view` — fit, zoom-at-point, pan, and whether the view is still in fit mode.
 - `decode` — background JPEG/PNG decode and EXIF orientation.

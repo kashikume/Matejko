@@ -25,7 +25,17 @@ The window title shows the file name and its place in the folder.
 - Drag — pan
 - On a video, the bar along the bottom seeks. It hides while the pointer is idle and stays while paused
 
+Started without a file, Matejko shows a picture explaining how to open a photo with Open with.
+
 Behavior is specified in [docs/spec.md](docs/spec.md).
+
+## Release build
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+```
+
+This builds `matejko.exe` for x64 and arm64 and packs both into `target\dist\Matejko-<version>.msi`, which installs only the exe that matches the machine. The installer offers a per-user install in `%LocalAppData%\Programs\Matejko` with no admin rights, or a per-machine install in `C:\Program Files\Matejko`. It registers Matejko for `.jpg`, `.jpeg`, `.png`, and `.mp4`, so it appears under Open with and in Settings → Default apps without becoming the default. The loose exes are copied to `target\dist` too. It needs the MSVC x64 and arm64 build tools and [WiX Toolset 3.14](https://github.com/wixtoolset/wix3/releases).
 
 ## License
 
