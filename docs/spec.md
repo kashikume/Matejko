@@ -101,12 +101,12 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored | Ignored |
 | Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored |
 | Delete | Open confirmation | Ignored | Ignored | Ignored |
-| E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Ignored |
+| E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Same as Exit. Ignored while the unsaved-changes question is up |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored | Ignored |
 | O | Open With dialog for the current file | Ignored | Ignored | Ignored |
 | F1 | Open help | Close help if help is open; otherwise ignored | Ignored | Ignored |
 | Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored | Ignored |
-| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Ignored |
+| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Same as Exit. While the unsaved-changes question is up, Keep editing |
 | Close, Alt+F4 | Quit | Quit | Quit | Quit |
 
 Mouse wheel and drag keep working during help, info, and delete confirmation, so the picture stays visible behind the text.
@@ -128,7 +128,7 @@ I dims the picture and draws a summary for the current file: name, folder, file 
 
 ### Edit mode
 
-`E` on a `.jpg` or `.jpeg` opens edit mode. The same key on a PNG or a video does nothing. Exit is a button on the panel. It asks before dropping unsaved control changes. Confirming leaves the file as it was at the last save and returns to viewing. Escape, the arrows, Delete, and Enter do not leave edit mode.
+`E` on a `.jpg` or `.jpeg` opens edit mode. The same key on a PNG or a video does nothing. Exit is a button on the panel, and Escape and E do the same. It asks before dropping unsaved control changes. Confirming leaves the file as it was at the last save and returns to viewing. While that question is up, Escape answers Keep editing and E does nothing, so a second press cannot discard edits. Escape never quits the app from edit mode. The arrows, Delete, and Enter do not leave edit mode.
 
 The panel is a column on the right, starting near a quarter of the window, with a draggable divider. It shows a histogram of the framed picture, a guide button (none, thirds, center, pointer), mirror and 90° buttons, the sliders, JPEG quality, the compare row O / Of / S / Sf, then Save, Save as copy, and Exit. Guides are screen-space lines, one at a time, and they are not saved. O, Of, S, and Sf show that picture only while held. Zoom and pan stay. Unlike the viewer, the wheel zooms out past the fitted size, down to a tenth of it, so the frame and the margin around it can be seen whole. S and Sf do nothing until the open file has a save. Save writes the current controls into the open JPEG. Save as copy opens the Windows Save As dialog in the photo's folder, with `<name>_copy.jpg` filled in. Any folder will do. The dialog asks before replacing a file. A name that is not `.jpg` or `.jpeg`, or the open file itself, is refused with a message on the panel. A copy in another folder takes its baseline along into that folder's `.matejko`. The session stays on the open file.
 
@@ -219,5 +219,5 @@ src/app.rs
 - Dragging pans without changing scale. Resizing while still fitted refits. Resizing after a zoom keeps the scale.
 - Delete then Escape does not change the file. Delete then Enter moves it to the Recycle Bin, shows the next image, and skips the removed file. Deleting the last remaining image exits.
 - A phone JPEG with orientation 6 is shown rotated upright.
-- `E` on a JPEG opens edit mode. `E` on a PNG or a video does nothing. Escape, the arrows, Delete, and Enter do not leave edit mode. Exit does, and it asks when the controls differ from the last save.
+- `E` on a JPEG opens edit mode. `E` on a PNG or a video does nothing. Exit, Escape, and E leave edit mode, and they ask when the controls differ from the last save. Escape on that question keeps editing. The arrows, Delete, and Enter do not leave edit mode.
 - A missing path shows a message box and exits with code 1, without a console window.

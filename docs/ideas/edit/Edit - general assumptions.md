@@ -258,9 +258,9 @@ The histogram is rebuilt at the end of the same run that updates the picture. Th
 
 ## Leaving edit mode
 
-E enters. Exit is a button on the edit panel, labeled Exit. It is the only way out of the mode.
+E enters. Exit is a button on the edit panel, labeled Exit. Escape and E do what Exit does.
 
-Esc does not leave edit mode, and it does not quit the app from there. In the viewer, Esc still leaves fullscreen or quits. Left, Right, Delete, and Enter do not leave edit mode either. Zoom and pan keep working.
+Esc does not quit the app from edit mode. It leaves edit mode as Exit would, so a second Esc in the viewer is what quits. While the unsaved-changes question is up, Esc answers Keep editing and E does nothing: a key pressed twice in a hurry does not discard edits. Left, Right, Delete, and Enter do not leave edit mode. Zoom and pan keep working.
 
 Exit with nothing unsaved returns to viewing. The browsed file is whatever Save last wrote, or the file that was opened if Save was never used.
 

@@ -81,6 +81,9 @@ pub enum Action {
     CancelOverlay,
     TogglePause,
     EnterEdit,
+    /// Escape or E in edit mode: what Exit does, or, while the unsaved-changes
+    /// question is up, Escape answers Keep editing.
+    ExitEdit { escape: bool },
 }
 
 const PAGE_STEP: isize = 10;
@@ -129,6 +132,8 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::OpenWith) => Action::OpenWith,
         (Mode::Viewing { .. }, Command::Pause) => Action::TogglePause,
         (Mode::Viewing { .. }, Command::Edit) => Action::EnterEdit,
+        (Mode::Editing, Command::Escape) => Action::ExitEdit { escape: true },
+        (Mode::Editing, Command::Edit) => Action::ExitEdit { escape: false },
         (Mode::Editing, _) => Action::None,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
@@ -449,6 +454,7 @@ impl App {
             }
             Action::TogglePause => self.toggle_video_pause(),
             Action::EnterEdit => self.begin_edit(),
+            Action::ExitEdit { escape } => self.exit_edit_key(escape),
         }
     }
 
@@ -1423,6 +1429,22 @@ impl App {
         editing.confirm_exit = false;
         editing.notice = Some("Saving…".into());
         self.request_redraw();
+    }
+
+    /// Escape or E: the Exit button. While the question about unsaved
+    /// changes is up, Escape answers Keep editing and E does nothing, so a
+    /// second press cannot throw edits away.
+    fn exit_edit_key(&mut self, escape: bool) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        if editing.confirm_exit {
+            if escape {
+                self.edit_press(EditHit::ConfirmNo);
+            }
+            return;
+        }
+        self.edit_press(EditHit::Exit);
     }
 
     fn leave_edit(&mut self) {
@@ -2690,11 +2712,18 @@ mod tests {
             Action::EnterEdit
         );
         assert_eq!(action_for(Command::Edit, viewing, true), Action::None);
-        assert_eq!(action_for(Command::Escape, Mode::Editing, false), Action::None);
+        assert_eq!(
+            action_for(Command::Escape, Mode::Editing, false),
+            Action::ExitEdit { escape: true }
+        );
+        assert_eq!(
+            action_for(Command::Edit, Mode::Editing, false),
+            Action::ExitEdit { escape: false }
+        );
+        assert_eq!(action_for(Command::Escape, Mode::Editing, true), Action::None);
         assert_eq!(action_for(Command::Left, Mode::Editing, false), Action::None);
         assert_eq!(action_for(Command::Enter, Mode::Editing, false), Action::None);
         assert_eq!(action_for(Command::Delete, Mode::Editing, false), Action::None);
-        assert_eq!(action_for(Command::Edit, Mode::Editing, false), Action::None);
     }
 
     #[test]
