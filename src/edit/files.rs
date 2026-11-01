@@ -43,20 +43,55 @@ impl SessionPaths {
         }
     }
 
-    /// A new version beside `session`. It shares the session's baseline,
-    /// which may belong to an earlier file than the one that is open.
-    pub fn for_copy(session: &SessionPaths, copy_name: &str) -> Self {
-        let folder = session.open.parent().unwrap_or(Path::new("."));
-        let copy = folder.join(copy_name);
-        let stem = Path::new(copy_name)
+    /// A new version at `copy`. In the session's own folder it shares the
+    /// session's baseline, which may belong to an earlier file than the one
+    /// that is open. In another folder it gets a baseline of its own in that
+    /// folder's `.matejko`, with the same bytes. A different photo's baseline
+    /// already there under that name is left alone: the new one takes the
+    /// next free name, `<stem>_2.jpg` and so on, and the adj records it.
+    pub fn for_copy(session: &SessionPaths, copy: &Path, baseline_bytes: &[u8]) -> Self {
+        let folder = copy.parent().unwrap_or(Path::new("."));
+        let matejko = folder.join(".matejko");
+        let stem = copy
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| "image".into());
+        let adj = matejko.join(format!("{stem}.matejko_adj"));
+        let session_folder = session.open.parent().unwrap_or(Path::new("."));
+        if same_folder(folder, session_folder) {
+            return Self {
+                open: copy.to_path_buf(),
+                baseline: session.baseline.clone(),
+                adj,
+                original_name: session.original_name.clone(),
+            };
+        }
+        let original = Path::new(&session.original_name);
+        let original_stem = original
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        let extension = original
+            .extension()
+            .map(|extension| format!(".{}", extension.to_string_lossy()))
+            .unwrap_or_default();
+        let mut name = session.original_name.clone();
+        for n in 2.. {
+            let candidate = matejko.join(&name);
+            let free = match fs::read(&candidate) {
+                Ok(bytes) => bytes == baseline_bytes,
+                Err(_) => !candidate.exists(),
+            };
+            if free {
+                break;
+            }
+            name = format!("{original_stem}_{n}{extension}");
+        }
         Self {
-            open: copy,
-            baseline: session.baseline.clone(),
-            adj: folder.join(".matejko").join(format!("{stem}.matejko_adj")),
-            original_name: session.original_name.clone(),
+            open: copy.to_path_buf(),
+            baseline: matejko.join(&name),
+            adj,
+            original_name: name,
         }
     }
 }
@@ -249,12 +284,20 @@ pub fn save_over(session: &LoadedSession, adjustments: &Adjustments) -> Result<(
     )
 }
 
+/// Two paths name the same folder, however they are spelled.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 pub fn save_copy(
     session: &LoadedSession,
-    copy_name: &str,
+    copy: &Path,
     adjustments: &Adjustments,
 ) -> Result<PathBuf, String> {
-    let paths = SessionPaths::for_copy(&session.paths, copy_name);
+    let paths = SessionPaths::for_copy(&session.paths, copy, &session.baseline_bytes);
     if let Some(parent) = paths.baseline.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -265,7 +308,7 @@ pub fn save_copy(
         &paths.open,
         &paths.baseline,
         &paths.adj,
-        &session.paths.original_name,
+        &paths.original_name,
         &session.baseline_bytes,
         &session.baseline,
         adjustments,
@@ -767,10 +810,10 @@ mod tests {
         fs::write(&path, tagged_jpeg()).unwrap();
         let mut changed = load_session(&path).unwrap().adjustments;
         changed.exposure_ev = 0.5;
-        save_copy(&load_session(&path).unwrap(), "photo_v2.jpg", &changed).unwrap();
+        save_copy(&load_session(&path).unwrap(), &dir.join("photo_v2.jpg"), &changed).unwrap();
         let second = load_session(&dir.join("photo_v2.jpg")).unwrap();
         assert_eq!(second.paths.original_name, "photo.jpg");
-        save_copy(&second, "photo_v3.jpg", &changed).unwrap();
+        save_copy(&second, &dir.join("photo_v3.jpg"), &changed).unwrap();
         let mut jpegs: Vec<String> = fs::read_dir(dir.join(".matejko"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -804,6 +847,51 @@ mod tests {
             .join("\n");
         let back = AdjFile::parse(&old).unwrap();
         assert_eq!((back.adjustments.vertical, back.adjustments.horizontal), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_copy_in_another_folder_takes_its_baseline_along() {
+        let dir = temp_dir("elsewhere");
+        let home = dir.join("holiday");
+        let away = dir.join("best");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&away).unwrap();
+        let path = home.join("photo.jpg");
+        let original = tagged_jpeg();
+        fs::write(&path, &original).unwrap();
+        let mut changed = load_session(&path).unwrap().adjustments;
+        changed.exposure_ev = 0.5;
+        save_copy(&load_session(&path).unwrap(), &away.join("pick.jpg"), &changed).unwrap();
+        // The copy's folder holds everything a later session needs.
+        assert_eq!(fs::read(away.join(".matejko").join("photo.jpg")).unwrap(), original);
+        let later = load_session(&away.join("pick.jpg")).unwrap();
+        assert_eq!(later.paths.original_name, "photo.jpg");
+        assert_eq!(later.adjustments.exposure_ev, 0.5);
+        // A second copy there reuses the same baseline.
+        save_copy(&later, &away.join("pick_2.jpg"), &changed).unwrap();
+        let baselines = |folder: &Path| {
+            let mut names: Vec<String> = fs::read_dir(folder.join(".matejko"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".jpg"))
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(baselines(&away), ["photo.jpg"]);
+
+        // Another photo's baseline under the same name is not touched.
+        let crowded = dir.join("crowded");
+        fs::create_dir_all(crowded.join(".matejko")).unwrap();
+        fs::write(crowded.join(".matejko").join("photo.jpg"), b"someone else").unwrap();
+        save_copy(&load_session(&path).unwrap(), &crowded.join("pick.jpg"), &changed).unwrap();
+        assert_eq!(fs::read(crowded.join(".matejko").join("photo.jpg")).unwrap(), b"someone else");
+        assert_eq!(fs::read(crowded.join(".matejko").join("photo_2.jpg")).unwrap(), original);
+        let later = load_session(&crowded.join("pick.jpg")).unwrap();
+        assert_eq!(later.paths.original_name, "photo_2.jpg");
+        // Copies saved elsewhere write nothing beside the photo itself.
+        assert!(!home.join(".matejko").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

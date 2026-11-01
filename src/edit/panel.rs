@@ -391,7 +391,6 @@ pub fn layout(
     has_save: bool,
     holding: Option<ImageControls>,
     confirm_exit: bool,
-    copy_name: Option<&str>,
     message: Option<&str>,
     scroll: f32,
 ) -> Panel {
@@ -498,12 +497,8 @@ pub fn layout(
         ]);
     }
     b.y += 4.0 * scale;
-    for line in copy_name
-        .map(|name| format!("Copy name  {name}_"))
-        .into_iter()
-        .chain(message.map(str::to_string))
-    {
-        b.text(line, x0, x1, Align::Left, Tone::Notice, None);
+    if let Some(message) = message {
+        b.text(message.to_string(), x0, x1, Align::Left, Tone::Notice, None);
         b.y += b.row_h;
     }
     // Taller than the window: the whole column scrolls, histogram and all.
@@ -583,7 +578,7 @@ mod tests {
     fn tracks_sit_right_of_the_labels_and_map_both_ways() {
         let adj = Adjustments::defaults(90);
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, 0.0,
         );
         let track = panel.track(Slider::Contrast).unwrap();
         assert!(track.x0 > panel.x + 100.0 && track.x1 < 1600.0);
@@ -597,7 +592,7 @@ mod tests {
     fn rows_have_a_margin_and_groups_have_room_above_their_titles() {
         let adj = Adjustments::defaults(90);
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, 0.0,
         );
         // Every control starts clear of the divider.
         for (_, x0, ..) in &panel.rows {
@@ -624,7 +619,7 @@ mod tests {
         let mut adj = Adjustments::defaults(90);
         adj.mirror_vertical = true;
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, 0.0,
         );
         let h = panel.row_rect(Hit::MirrorH).unwrap();
         let v = panel.row_rect(Hit::MirrorV).unwrap();
@@ -647,7 +642,7 @@ mod tests {
     fn a_short_window_scrolls_the_panel() {
         let adj = Adjustments::defaults(90);
         let at = |scroll| {
-            layout(1600.0, 400.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, scroll)
+            layout(1600.0, 400.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, scroll)
         };
         let top = at(0.0);
         assert!(top.max_scroll > 0.0 && top.scrollbar.is_some());
@@ -664,7 +659,7 @@ mod tests {
         let (track, _) = end.scrollbar.unwrap();
         assert_eq!(hit_test(&end, track[0] + 1.0, exit[1] + 2.0), Some(Hit::Scrollbar));
         // A tall window does not scroll.
-        let tall = layout(1600.0, 2000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 50.0);
+        let tall = layout(1600.0, 2000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, 50.0);
         assert_eq!((tall.scroll, tall.max_scroll), (0.0, 0.0));
         assert!(tall.scrollbar.is_none());
     }
@@ -673,7 +668,7 @@ mod tests {
     fn save_save_as_copy_and_exit_share_one_row() {
         let adj = Adjustments::defaults(90);
         let panel = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, None, 0.0,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, false, None, 0.0,
         );
         let save = panel.row_rect(Hit::Save).unwrap();
         let copy = panel.row_rect(Hit::SaveCopy).unwrap();
@@ -681,7 +676,7 @@ mod tests {
         assert!(save[1] == copy[1] && copy[1] == exit[1], "not one row");
         assert!(save[2] < copy[0] && copy[2] < exit[0], "buttons overlap");
         let confirm = layout(
-            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, true, None, None, 0.0,
+            1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, false, None, true, None, 0.0,
         );
         let yes = confirm.row_rect(Hit::ConfirmYes).unwrap();
         let no = confirm.row_rect(Hit::ConfirmNo).unwrap();
@@ -692,7 +687,7 @@ mod tests {
     fn s_and_sf_wait_for_a_save() {
         let adj = Adjustments::defaults(90);
         let compare_hits = |has_save| {
-            layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, has_save, None, false, None, None, 0.0)
+            layout(1600.0, 1000.0, 1.0, 0.25, &adj, Guide::None, has_save, None, false, None, 0.0)
                 .rows
                 .iter()
                 .filter(|row| matches!(row.0, Hit::Compare(_)))

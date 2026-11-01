@@ -259,8 +259,6 @@ struct Editing {
     scrubbing: bool,
     holding: Option<ImageControls>,
     confirm_exit: bool,
-    copy_name: Option<String>,
-    replace_copy: bool,
     notice: Option<String>,
     saved_once: bool,
     saving: bool,
@@ -856,8 +854,6 @@ impl App {
             scrubbing: false,
             holding: None,
             confirm_exit: false,
-            copy_name: None,
-            replace_copy: false,
             notice: None,
             saved_once: false,
             saving: false,
@@ -952,7 +948,7 @@ impl App {
                 editing.saved_once = true;
                 "Saved.".into()
             }
-            (SaveTarget::Copy(name), Ok(())) => format!("Saved {name}."),
+            (SaveTarget::Copy(path), Ok(())) => format!("Saved {}.", path.display()),
             (_, Err(err)) => err,
         });
         if !self.catalog.is_empty() {
@@ -982,7 +978,6 @@ impl App {
             editing.loaded.had_adj || editing.saved_once,
             editing.holding,
             editing.confirm_exit,
-            editing.copy_name.as_deref(),
             editing.notice.as_deref(),
             editing.scroll,
         ))
@@ -1246,12 +1241,7 @@ impl App {
                 rerun = true;
             }
             EditHit::Save => {}
-            EditHit::SaveCopy => {
-                if !editing.saving {
-                    editing.copy_name = Some(copy_stem(&editing.loaded.paths.open));
-                    editing.replace_copy = false;
-                }
-            }
+            EditHit::SaveCopy => {}
             EditHit::Exit => {
                 if editing.saving {
                     editing.notice = Some("Saving. Exit when it is done.".into());
@@ -1277,8 +1267,12 @@ impl App {
                 }
             }
         }
+        if matches!(hit, EditHit::SaveCopy) {
+            self.save_edit_copy();
+            return;
+        }
         if matches!(hit, EditHit::Save) {
-            self.save_edit(false);
+            self.save_edit();
             return;
         }
         if rerun {
@@ -1377,36 +1371,55 @@ impl App {
         self.request_redraw();
     }
 
-    fn save_edit(&mut self, as_copy: bool) {
+    /// Save: render the current controls over the open file.
+    fn save_edit(&mut self) {
+        self.start_save(SaveTarget::Over);
+    }
+
+    /// Save as copy: the Windows Save As dialog picks the name. It opens in
+    /// the photo's folder, and any folder will do. It asks before replacing
+    /// a file that exists.
+    fn save_edit_copy(&mut self) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        if editing.saving {
+            return;
+        }
+        let open = editing.loaded.paths.open.clone();
+        let folder = open.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let hwnd = self
+            .window
+            .as_ref()
+            .and_then(|window| window_hwnd(window))
+            .unwrap_or(std::ptr::null_mut());
+        // Modal: the dialog runs its own message loop until it closes.
+        let chosen = save_as_dialog(hwnd, &folder, &copy_stem(&open));
+        // The press that opened the dialog was released inside it.
+        self.dragging = false;
+        let Some(chosen) = chosen else {
+            return;
+        };
+        match copy_path(&open, &chosen) {
+            Ok(path) => self.start_save(SaveTarget::Copy(path)),
+            Err(message) => {
+                if let Some(editing) = &mut self.editing {
+                    editing.notice = Some(message);
+                }
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn start_save(&mut self, target: SaveTarget) {
         let Some(editing) = self.editing.as_mut() else {
             return;
         };
         if editing.saving {
             return;
         }
-        let target = if as_copy {
-            let name = editing.copy_name.clone().unwrap_or_else(|| "copy.jpg".into());
-            let path = editing
-                .loaded
-                .paths
-                .open
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(&name);
-            if path.exists() && !editing.replace_copy {
-                editing.replace_copy = true;
-                editing.notice = Some("That name exists. Enter again to replace it.".into());
-                self.request_redraw();
-                return;
-            }
-            SaveTarget::Copy(name)
-        } else {
-            SaveTarget::Over
-        };
         editing.worker.save(target, &editing.current);
         editing.saving = true;
-        editing.copy_name = None;
-        editing.replace_copy = false;
         editing.confirm_exit = false;
         editing.notice = Some("Saving…".into());
         self.request_redraw();
@@ -1425,42 +1438,6 @@ impl App {
         self.stamps.remove(&path);
         self.sync_images();
         self.request_redraw();
-    }
-
-    fn type_copy_name(&mut self, key: &Key) -> bool {
-        let editing = self.editing.as_ref();
-        if editing.is_none_or(|editing| editing.copy_name.is_none()) {
-            return false;
-        }
-        match key {
-            Key::Named(NamedKey::Escape) => {
-                if let Some(editing) = &mut self.editing {
-                    editing.copy_name = None;
-                    editing.replace_copy = false;
-                    editing.notice = None;
-                }
-            }
-            Key::Named(NamedKey::Enter) => self.save_edit(true),
-            Key::Named(NamedKey::Backspace) => {
-                if let Some(editing) = &mut self.editing {
-                    if let Some(name) = &mut editing.copy_name {
-                        name.pop();
-                    }
-                }
-            }
-            Key::Character(ch) => {
-                if let Some(editing) = &mut self.editing {
-                    if let Some(name) = &mut editing.copy_name {
-                        if !ch.chars().any(|c| c.is_control()) && name.len() < 120 {
-                            name.push_str(ch);
-                        }
-                    }
-                }
-            }
-            _ => return false,
-        }
-        self.request_redraw();
-        true
     }
 
     /// The photo, the usable rectangle, and the frame on screen, each as
@@ -2088,9 +2065,6 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if self.type_copy_name(&event.logical_key) {
-                    return;
-                }
                 if let Some(command) = command_from(&event.logical_key) {
                     self.on_command(event_loop, command, event.repeat);
                 }
@@ -2362,6 +2336,72 @@ fn is_jpeg(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg"))
 }
 
+/// The path of a copy chosen in the Save As dialog, if it can be one: a
+/// JPEG, and not the open file itself. Any folder will do: the copy takes
+/// its baseline along into that folder's `.matejko`.
+fn copy_path(open: &Path, chosen: &Path) -> Result<PathBuf, String> {
+    if !is_jpeg(chosen) {
+        return Err("A copy is a JPEG. End its name with .jpg or .jpeg.".into());
+    }
+    let same_file = match (fs::canonicalize(open), chosen.parent().map(fs::canonicalize)) {
+        (Ok(open), Some(Ok(folder))) => chosen
+            .file_name()
+            .is_some_and(|name| folder.join(name).to_string_lossy().to_lowercase()
+                == open.to_string_lossy().to_lowercase()),
+        _ => chosen == open,
+    };
+    if same_file {
+        return Err("That is the open file. Save writes over it.".into());
+    }
+    Ok(chosen.to_path_buf())
+}
+
+/// The Windows Save As dialog, opened in `folder` with `suggested` filled in.
+/// It asks before replacing a file that exists. `None` when cancelled.
+fn save_as_dialog(hwnd: *mut std::ffi::c_void, folder: &Path, suggested: &str) -> Option<PathBuf> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetSaveFileNameW, OFN_EXPLORER, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+
+    fn wide(text: &OsStr) -> Vec<u16> {
+        text.encode_wide().chain(std::iter::once(0)).collect()
+    }
+    // The file name buffer: the suggestion in, the chosen path out.
+    let mut file = vec![0u16; 1024];
+    for (slot, unit) in file.iter_mut().zip(OsStr::new(suggested).encode_wide()) {
+        *slot = unit;
+    }
+    // Pairs of display name and pattern, ended by an empty string.
+    let filter: Vec<u16> = "JPEG image\0*.jpg;*.jpeg\0\0".encode_utf16().collect();
+    let folder = wide(folder.as_os_str());
+    let title = wide(OsStr::new("Save as copy"));
+    let extension = wide(OsStr::new("jpg"));
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: HWND(hwnd),
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file.as_mut_ptr()),
+        nMaxFile: file.len() as u32,
+        lpstrInitialDir: PCWSTR(folder.as_ptr()),
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        lpstrDefExt: PCWSTR(extension.as_ptr()),
+        Flags: OFN_EXPLORER
+            | OFN_OVERWRITEPROMPT
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR
+            | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+    if !unsafe { GetSaveFileNameW(&mut dialog) }.as_bool() {
+        return None;
+    }
+    let end = file.iter().position(|unit| *unit == 0).unwrap_or(file.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&file[..end])))
+}
+
 fn copy_stem(path: &Path) -> String {
     let stem = path
         .file_stem()
@@ -2517,6 +2557,24 @@ fn app_icon() -> Option<Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_is_a_jpeg_anywhere_but_not_the_open_photo() {
+        let root = std::env::temp_dir().join(format!("matejko-copy-{}", std::process::id()));
+        let folder = root.join("holiday");
+        let other = root.join("elsewhere");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let open = folder.join("photo.jpg");
+        fs::write(&open, b"jpeg").unwrap();
+        assert!(copy_path(&open, &folder.join("photo_v2.jpg")).is_ok());
+        assert!(copy_path(&open, &folder.join("Photo v2.JPEG")).is_ok());
+        // Another folder is fine, even under the photo's own name.
+        assert_eq!(copy_path(&open, &other.join("photo.jpg")), Ok(other.join("photo.jpg")));
+        assert!(copy_path(&open, &folder.join("photo_v2.png")).is_err());
+        assert!(copy_path(&open, &folder.join("PHOTO.jpg")).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn keys_follow_the_viewing_and_confirmation_table() {

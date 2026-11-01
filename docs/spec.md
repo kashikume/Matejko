@@ -99,14 +99,14 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored | Ignored |
 | Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored | Ignored |
 | Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored | Ignored |
-| Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored, except to confirm a copy name |
+| Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored |
 | Delete | Open confirmation | Ignored | Ignored | Ignored |
 | E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Ignored |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored | Ignored |
 | O | Open With dialog for the current file | Ignored | Ignored | Ignored |
 | F1 | Open help | Close help if help is open; otherwise ignored | Ignored | Ignored |
 | Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored | Ignored |
-| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Ignored. A copy-name prompt closes; edit mode stays. |
+| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Ignored |
 | Close, Alt+F4 | Quit | Quit | Quit | Quit |
 
 Mouse wheel and drag keep working during help, info, and delete confirmation, so the picture stays visible behind the text.
@@ -130,7 +130,7 @@ I dims the picture and draws a summary for the current file: name, folder, file 
 
 `E` on a `.jpg` or `.jpeg` opens edit mode. The same key on a PNG or a video does nothing. Exit is a button on the panel. It asks before dropping unsaved control changes. Confirming leaves the file as it was at the last save and returns to viewing. Escape, the arrows, Delete, and Enter do not leave edit mode.
 
-The panel is a column on the right, starting near a quarter of the window, with a draggable divider. It shows a histogram of the framed picture, a guide button (none, thirds, center, pointer), mirror and 90° buttons, the sliders, JPEG quality, the compare row O / Of / S / Sf, then Save, Save as copy, and Exit. Guides are screen-space lines, one at a time, and they are not saved. O, Of, S, and Sf show that picture only while held. Zoom and pan stay. Unlike the viewer, the wheel zooms out past the fitted size, down to a tenth of it, so the frame and the margin around it can be seen whole. S and Sf do nothing until the open file has a save. Save writes the current controls into the open JPEG. Save as copy asks for a name in the same folder. The session stays on the open file.
+The panel is a column on the right, starting near a quarter of the window, with a draggable divider. It shows a histogram of the framed picture, a guide button (none, thirds, center, pointer), mirror and 90° buttons, the sliders, JPEG quality, the compare row O / Of / S / Sf, then Save, Save as copy, and Exit. Guides are screen-space lines, one at a time, and they are not saved. O, Of, S, and Sf show that picture only while held. Zoom and pan stay. Unlike the viewer, the wheel zooms out past the fitted size, down to a tenth of it, so the frame and the margin around it can be seen whole. S and Sf do nothing until the open file has a save. Save writes the current controls into the open JPEG. Save as copy opens the Windows Save As dialog in the photo's folder, with `<name>_copy.jpg` filled in. Any folder will do. The dialog asks before replacing a file. A name that is not `.jpg` or `.jpeg`, or the open file itself, is refused with a message on the panel. A copy in another folder takes its baseline along into that folder's `.matejko`. The session stays on the open file.
 
 The baseline is a byte copy in `.matejko`, taken once before the first overwrite. Later versions share that file. Adjustments are a JSON file beside it. The pipeline is the one in `docs/ideas/edit`. While a slider or the frame is moving, the run uses a long-side-1600 preview. Releasing, and the 90°, mirror, and shape clicks, run the full baseline. An untouched picture whose quality is still the file's estimate is copied byte for byte. A re-encode is 4:4:4, keeps the other EXIF tags, sets orientation to normal, writes the new pixel size, and appends `edited with Matejko` to Software once.
 

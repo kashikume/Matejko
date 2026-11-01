@@ -2,6 +2,7 @@
 //! each kind is kept: a slider drag that outruns the pipeline skips the
 //! runs it no longer needs.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -31,7 +32,8 @@ pub struct Rendered {
 
 pub enum SaveTarget {
     Over,
-    Copy(String),
+    /// The full path of the new file. It may be in another folder.
+    Copy(PathBuf),
 }
 
 pub struct Saved {
@@ -110,8 +112,8 @@ impl EditWorker {
                         Job::Save(target, adjustments) => {
                             let result = match &target {
                                 SaveTarget::Over => save_over(&session, &adjustments),
-                                SaveTarget::Copy(name) => {
-                                    save_copy(&session, name, &adjustments).map(|_| ())
+                                SaveTarget::Copy(path) => {
+                                    save_copy(&session, path, &adjustments).map(|_| ())
                                 }
                             };
                             WorkerEvent::Saved(Saved {
