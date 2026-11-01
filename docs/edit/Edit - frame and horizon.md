@@ -18,7 +18,7 @@ The usable rectangle is the largest such rectangle. Its sides touch the rotated 
 
 The rotated border is the snap line. Dragging an edge or a corner outward moves the frame until a corner meets the border, and then the edge sticks there. It does not travel into the empty corner, and it does not stop short of the border while the pointer is still pulling outward. A moved frame that meets the border on one side keeps following the pointer along the other axis.
 
-Changing the angle rebuilds the quad and the snap lines. The frame is stored as a fraction of the usable rectangle, so a full frame stays snapped to the new borders, and a tighter frame stays the same fraction of them. A frame whose corners are no longer on the photo at the new angle is drawn toward the centered fit, the largest frame of its ratio centered in the usable rectangle, until they are. That fit is always on the photo. Every frame between it and the stored one has its corners between two points on the photo, which is convex, so the search finds the closest frame that fits.
+Changing the angle rebuilds the quad and the snap lines. The frame is stored as a fraction of the usable rectangle, so a full frame stays snapped to the new borders, and a tighter frame stays the same fraction of them. A tighter frame that still lies entirely on the photo keeps its place. A frame whose corners are no longer on the photo at the new angle is drawn toward the centered fit, the largest frame of its ratio centered in the usable rectangle, until they are. That fit is always on the photo. Every frame between it and the stored one has its corners between two points on the photo, which is convex, so the search finds the closest frame that fits.
 
 ## Where they sit
 
@@ -85,7 +85,25 @@ height = h · hr
 
 `inset_x` and `inset_y` place the usable rectangle on the rotated canvas. `width` and `height` are at least 1 pixel. The output image is that size. Nothing outside it is rendered.
 
-An aspect lock, when it is on, fits one of these ratios inside the usable rectangle and keeps that ratio while the frame is dragged: free, the baseline's own ratio, 1:1, 4:5, 3:2, 16:9. Free is the default. The lock changes `w` and `h` together. It does not change θ.
+One button cycles the frame's shape. Each click advances, and the label is the step that is showing:
+
+1. Original
+2. Free
+3. 3:2
+4. 2:3
+5. 4:3
+6. 3:4
+7. 1:1
+8. 4:5
+9. 5:4
+10. 16:9
+11. 9:16
+
+The click after 9:16 returns to Original. Edit mode opens on Original. Original is the ratio of the picture after the mirrors and quarter turns, before this small rotation.
+
+A 90° turn rotates the picture and the frame together. The stored fractions turn with the pixels. Before the turn they are `(x, y, w, h)` of that picture. After a clockwise turn they are `(1 − y − h, x, h, w)`. A numbered ratio swaps its sides: `3:2` becomes `2:3`, `4:3` becomes `3:4`, `4:5` becomes `5:4`, `16:9` becomes `9:16`, and each of those swaps back on the next turn. `1:1` stays `1:1`. Free stays free. Original stays the word Original, and the picture's own ratio has swapped because the pixels turned. The small rotation is left as it was. If the turned frame would then cover an empty pixel, the fit above runs.
+
+Each click sets the frame to the largest upright rectangle of that ratio that fits inside the usable rectangle, centered on it. No empty pixel is inside it. Free is the usable rectangle itself, the largest upright rectangle of any ratio. Dragging then resizes or moves that rectangle, anywhere its corners stay on the photo. A numbered ratio keeps its ratio while it is dragged. Free does not. The drag still snaps to the rotated border.
 
 On the picture, the frame is the bright rectangle and the discarded margin is dimmed. The picture on screen is the whole rotated photo, in the upright box that just holds it: `W · |cos θ| + H · |sin θ|` by `W · |sin θ| + H · |cos θ|`, centered where the photo was. No corner of the photo is cut off on screen. The zoom holds the photo's size, so the box grows around it rather than the photo shrinking into it. The empty corners left by the rotation are part of that margin. They are not a place the frame can sit. The rectangle itself is edited on the picture, and each drag snaps as above. The same angle is a slider on the panel, in the Frame group, −45° to +45°.
 
@@ -103,13 +121,15 @@ The pointer on the picture:
 | range | Clamp on the angle | −45…+45 |
 | `x`, `y` | Top-left of the frame, fraction of the usable rectangle | 0, 0 |
 | `w`, `h` | Size of the frame, fraction of the usable rectangle | 1, 1 |
-| aspect | Lock while dragging the frame | free |
+| `aspect` | Shape of the frame. `original`, `free`, or a ratio such as `3:2` | original |
 | kernel | Resample | Catmull–Rom |
 
 ## Failure cases worth testing against
 
 - θ = 0 and a full frame. The render matches the tone pipeline output, pixel for pixel. A resample at zero means the skip was missed.
-- Moving the rotation slider to 10°. The whole picture turns counterclockwise and the frame stays upright.
+- Moving the rotation slider to 10°. The whole picture turns counterclockwise and the frame stays upright. A frame whose corner would land on an empty pixel is drawn toward the centered fit of its ratio until it lies on the photo again.
+- Clicking the shape button to 1:1. The frame becomes the largest square inside the rotated photo. A square that leaves a band of photo unused on the long side is the right result. A square that contains an empty corner is not.
+- Aspect `3:2`, then one click of 90°. The picture is on its side and the aspect is `2:3`. The next click returns it to `3:2`. Original stays labeled Original, and its ratio has swapped with the pixels.
 - θ = 10° on a 4:3 phone JPEG. Every output pixel is a photo pixel. An empty corner inside the frame means a drag crossed the rotated border without snapping.
 - Dragging the right edge outward at θ = 10°. The edge meets the rotated photo and stays on that border. A gap between the edge and the border, while the drag is still outward, means the snap stopped early. A black triangle inside the edge means it did not stop.
 - The same crop fractions at θ = 0 and θ = 10°. Both fill their frame. The 10° frame is the smaller inscribed rectangle, not the baseline with black corners.
