@@ -20,6 +20,7 @@ pub enum Slider {
     Rotation,
     Vertical,
     Horizontal,
+    Distortion,
     Quality,
 }
 
@@ -49,6 +50,7 @@ impl Slider {
             Slider::Rotation => adj.rotation,
             Slider::Vertical => adj.vertical,
             Slider::Horizontal => adj.horizontal,
+            Slider::Distortion => adj.distortion,
             Slider::Quality => adj.jpeg_quality as f32,
         }
     }
@@ -71,6 +73,7 @@ impl Slider {
             Slider::Rotation => adj.rotation = value,
             Slider::Vertical => adj.vertical = value,
             Slider::Horizontal => adj.horizontal = value,
+            Slider::Distortion => adj.distortion = value,
             Slider::Quality => adj.jpeg_quality = value.round().clamp(1.0, 100.0) as u8,
         }
     }
@@ -114,6 +117,7 @@ impl Slider {
             Slider::Rotation => "Rotation",
             Slider::Vertical => "Vertical",
             Slider::Horizontal => "Horizontal",
+            Slider::Distortion => "Distortion",
             Slider::Quality => "JPEG quality",
         }
     }
@@ -446,6 +450,7 @@ pub fn layout(
     b.slider(Slider::Rotation, adj);
     b.slider(Slider::Vertical, adj);
     b.slider(Slider::Horizontal, adj);
+    b.slider(Slider::Distortion, adj);
     b.heading("Output");
     b.slider(Slider::Quality, adj);
     b.y += 10.0 * scale;
@@ -585,7 +590,7 @@ mod tests {
         let mid = track.x_of(0.0);
         assert!((track.value_at(mid)).abs() < 1.0e-3);
         assert!((track.delta(track.x1 - track.x0) - 200.0).abs() < 1.0e-3);
-        assert_eq!(panel.tracks.len(), 15);
+        assert_eq!(panel.tracks.len(), 16);
     }
 
     #[test]

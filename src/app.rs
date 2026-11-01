@@ -2336,7 +2336,10 @@ fn oriented_extent(image: &LinearImage, adjustments: &Adjustments) -> (f32, f32)
 /// Sets a slider. Rotation also pulls the frame back inside the rotated photo.
 fn apply_slider(editing: &mut Editing, slider: Slider, value: f32) {
     slider.set(&mut editing.current, value);
-    if matches!(slider, Slider::Rotation | Slider::Vertical | Slider::Horizontal) {
+    if matches!(
+        slider,
+        Slider::Rotation | Slider::Vertical | Slider::Horizontal | Slider::Distortion
+    ) {
         refit_frame(editing);
     }
 }

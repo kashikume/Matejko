@@ -24,7 +24,7 @@ Perspective is part of the one geometric resample at the end, with the horizon t
 
 1. Orient: mirrors and quarter turns, exact.
 2. The tone stages, on the oriented image.
-3. Perspective, then the horizon turn, then the frame: one resample.
+3. Lens distortion, then perspective, then the horizon turn, then the frame: one resample. `Edit - lens distortion.md` has the first.
 
 The keystone runs before the turn. A building is made upright by its own perspective first, and the horizon is then levelled on the corrected picture. The turn is about the photo's centre, which the keystone keeps still.
 

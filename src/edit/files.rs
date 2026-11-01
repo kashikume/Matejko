@@ -90,6 +90,8 @@ struct AdjBody {
     vertical: i32,
     #[serde(default)]
     horizontal: i32,
+    #[serde(default)]
+    distortion: i32,
     aspect: String,
     frame: FrameBody,
     jpeg_quality: u8,
@@ -131,6 +133,7 @@ impl AdjFile {
                 rotation: self.adjustments.rotation,
                 vertical: self.adjustments.vertical.round() as i32,
                 horizontal: self.adjustments.horizontal.round() as i32,
+                distortion: self.adjustments.distortion.round() as i32,
                 aspect: self.adjustments.aspect.label().into(),
                 frame: FrameBody {
                     x: self.adjustments.frame.x,
@@ -171,6 +174,7 @@ impl AdjFile {
                 rotation: raw.adjustments.rotation,
                 vertical: raw.adjustments.vertical as f32,
                 horizontal: raw.adjustments.horizontal as f32,
+                distortion: raw.adjustments.distortion as f32,
                 aspect,
                 frame: Frame {
                     x: raw.adjustments.frame.x,

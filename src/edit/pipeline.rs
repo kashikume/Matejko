@@ -133,6 +133,8 @@ pub struct Adjustments {
     /// Keystone, −100…+100. See `Warp::new`.
     pub vertical: f32,
     pub horizontal: f32,
+    /// Lens distortion, −100…+100. See `Warp::new`.
+    pub distortion: f32,
     pub aspect: Aspect,
     pub frame: Frame,
     pub jpeg_quality: u8,
@@ -158,6 +160,7 @@ impl Adjustments {
             rotation: 0.0,
             vertical: 0.0,
             horizontal: 0.0,
+            distortion: 0.0,
             aspect: Aspect::Original,
             frame: Frame::default(),
             jpeg_quality,
@@ -185,6 +188,7 @@ impl Adjustments {
             && self.rotation == 0.0
             && self.vertical == 0.0
             && self.horizontal == 0.0
+            && self.distortion == 0.0
             && self.aspect == Aspect::Original
             && self.frame == Frame::default()
     }
@@ -197,7 +201,14 @@ impl Adjustments {
 
     /// The geometry for a photo of this size in the chosen orientation.
     pub fn warp(&self, oriented_w: f32, oriented_h: f32) -> Warp {
-        Warp::new(self.rotation, self.vertical, self.horizontal, oriented_w, oriented_h)
+        Warp::new(
+            self.rotation,
+            self.vertical,
+            self.horizontal,
+            self.distortion,
+            oriented_w,
+            oriented_h,
+        )
     }
 
     /// Mirrors the result as it is on screen: the turn and the left-right
@@ -1144,9 +1155,17 @@ type Homography = [f64; 9];
 /// Full keystone at ±100: one edge 50% longer, the opposite 50% shorter.
 const KEYSTONE: f32 = 0.5;
 
-/// The geometry after the tone stages: perspective, then the horizon turn.
-/// Offsets are from the photo's centre, in pixels of the oriented photo,
-/// y down. The photo's centre stays where it is.
+/// Lens distortion coefficient at ±100. Each direction is written so that
+/// it cannot fold back on itself, so it may be this strong.
+const DISTORTION: f32 = 0.36;
+
+/// Points tested along each edge of a rectangle when the corrected photo's
+/// border is curved.
+const EDGE_SAMPLES: usize = 16;
+
+/// The geometry after the tone stages: lens distortion, perspective, then
+/// the horizon turn. Offsets are from the photo's centre, in pixels of the
+/// oriented photo, y down. The photo's centre stays where it is.
 #[derive(Clone, Copy, Debug)]
 pub struct Warp {
     pub width: f32,
@@ -1156,13 +1175,30 @@ pub struct Warp {
     sin: f32,
     /// Photo to corrected, and back. `None` when both sliders are 0.
     perspective: Option<(Homography, Homography)>,
+    /// Barrel correction: a photo point at radius ρ·R is shown at
+    /// ρ·(1 + c·ρ²)·R. 0 unless the slider is above 0.
+    barrel: f32,
+    /// Pincushion correction: an output point at radius ρ·R shows the photo
+    /// at ρ·(1 + k·ρ²)·R. 0 unless the slider is below 0.
+    pincushion: f32,
+    /// Half the photo's diagonal: the radius `k` is measured against.
+    radius: f32,
 }
 
 impl Warp {
     /// `vertical` and `horizontal` are the sliders, −100…+100. Positive
     /// vertical widens the top, which straightens verticals that lean in
     /// toward the top. Positive horizontal makes the right side taller.
-    pub fn new(rotation_deg: f32, vertical: f32, horizontal: f32, width: f32, height: f32) -> Self {
+    /// Positive `distortion` straightens lines a barrel lens bows outward,
+    /// negative straightens a pincushion's.
+    pub fn new(
+        rotation_deg: f32,
+        vertical: f32,
+        horizontal: f32,
+        distortion: f32,
+        width: f32,
+        height: f32,
+    ) -> Self {
         let theta = rotation_deg.to_radians();
         let perspective = (vertical != 0.0 || horizontal != 0.0).then(|| {
             let forward = keystone(vertical, horizontal, width, height);
@@ -1175,37 +1211,101 @@ impl Warp {
             cos: theta.cos(),
             sin: theta.sin(),
             perspective,
+            barrel: DISTORTION * distortion.clamp(0.0, 100.0) / 100.0,
+            pincushion: DISTORTION * (-distortion).clamp(0.0, 100.0) / 100.0,
+            radius: 0.5 * width.hypot(height),
         }
     }
 
     /// A turn alone, with no perspective.
     #[cfg(test)]
     pub fn turn(rotation_deg: f32, width: f32, height: f32) -> Self {
-        Self::new(rotation_deg, 0.0, 0.0, width, height)
+        Self::new(rotation_deg, 0.0, 0.0, 0.0, width, height)
     }
 
     pub fn is_identity(&self) -> bool {
-        self.theta.abs() < 1.0e-6 && self.perspective.is_none()
+        self.theta.abs() < 1.0e-6 && self.perspective.is_none() && self.straight()
     }
 
-    /// Where the photo point shown at an output offset came from.
+    /// The photo's border stays straight: turns and keystones keep lines
+    /// straight, so a rectangle lies on the photo when its corners do.
+    fn straight(&self) -> bool {
+        self.barrel == 0.0 && self.pincushion == 0.0
+    }
+
+    /// Where the photo point shown at an output offset came from. NaN where
+    /// no point of the photo is shown.
     fn source(&self, dx: f32, dy: f32) -> (f32, f32) {
         // Undo the counterclockwise turn by turning clockwise.
         let x = self.cos * dx - self.sin * dy;
         let y = self.sin * dx + self.cos * dy;
-        match &self.perspective {
+        let (x, y) = match &self.perspective {
             Some((_, back)) => apply(back, x, y),
             None => (x, y),
+        };
+        // Undo the lens correction. Each side uses the form that is explicit
+        // in the direction that cannot fold, and solves the other.
+        if self.barrel > 0.0 {
+            let rho = (x * x + y * y).sqrt() / self.radius;
+            if rho == 0.0 {
+                return (x, y);
+            }
+            let scale = solve_radius(self.barrel, rho) / rho;
+            return (x * scale, y * scale);
         }
+        if self.pincushion > 0.0 {
+            let rho2 = (x * x + y * y) / (self.radius * self.radius);
+            let scale = 1.0 + self.pincushion * rho2;
+            return (x * scale, y * scale);
+        }
+        (x, y)
     }
 
     /// Where a photo point is shown.
     fn forward(&self, sx: f32, sy: f32) -> (f32, f32) {
+        let (sx, sy) = self.undistort(sx, sy);
         let (x, y) = match &self.perspective {
             Some((there, _)) => apply(there, sx, sy),
             None => (sx, sy),
         };
         (self.cos * x + self.sin * y, -self.sin * x + self.cos * y)
+    }
+
+    /// Applies the lens correction to a photo point: where it moves to.
+    fn undistort(&self, sx: f32, sy: f32) -> (f32, f32) {
+        if self.barrel > 0.0 {
+            let rho2 = (sx * sx + sy * sy) / (self.radius * self.radius);
+            let scale = 1.0 + self.barrel * rho2;
+            return (sx * scale, sy * scale);
+        }
+        if self.pincushion > 0.0 {
+            let rho = (sx * sx + sy * sy).sqrt() / self.radius;
+            if rho == 0.0 {
+                return (sx, sy);
+            }
+            let scale = solve_radius(self.pincushion, rho) / rho;
+            return (sx * scale, sy * scale);
+        }
+        (sx, sy)
+    }
+
+    /// The rectangle between two output offsets lies on the photo. Corners
+    /// are enough for a straight border. A lens correction bends the border,
+    /// so points along each edge are tested too.
+    fn rect_on_photo(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        if !corners.iter().all(|&(x, y)| self.on_photo(x, y)) {
+            return false;
+        }
+        if self.straight() {
+            return true;
+        }
+        (1..EDGE_SAMPLES).all(|i| {
+            let t = i as f32 / EDGE_SAMPLES as f32;
+            let x = x0 + (x1 - x0) * t;
+            let y = y0 + (y1 - y0) * t;
+            self.on_photo(x, y0) && self.on_photo(x, y1) && self.on_photo(x0, y) && self.on_photo(x1, y)
+        })
     }
 
     /// An output offset shows a point of the photo.
@@ -1219,12 +1319,19 @@ impl Warp {
     }
 
     /// The box around the whole corrected photo: min x, min y, max x, max y.
+    /// A curved border can reach furthest between the corners, so it is
+    /// walked along its length.
     fn bounds(&self) -> [f32; 4] {
         let (a, b) = (self.width * 0.5, self.height * 0.5);
+        let steps = if self.straight() { 1 } else { 4 * EDGE_SAMPLES };
         let mut out = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-        for (sx, sy) in [(-a, -b), (a, -b), (a, b), (-a, b)] {
-            let (x, y) = self.forward(sx, sy);
-            out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+        for i in 0..steps {
+            let t = i as f32 / steps as f32;
+            let along = -1.0 + 2.0 * t;
+            for (sx, sy) in [(a * along, -b), (a, b * along), (-a * along, b), (-a, -b * along)] {
+                let (x, y) = self.forward(sx, sy);
+                out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+            }
         }
         out
     }
@@ -1255,15 +1362,11 @@ impl Warp {
     /// The largest upright rectangle centred on the photo's centre that lies
     /// on the corrected photo: width, height. A turn alone has a closed form.
     pub fn usable(&self) -> (f32, f32) {
-        let Some(_) = self.perspective else {
+        if self.perspective.is_none() && self.straight() {
             let (_, _, uw, uh) = usable_rect(self.width, self.height, self.theta);
             return (uw, uh);
-        };
-        let fits = |a: f32, b: f32| {
-            [(-a, -b), (a, -b), (a, b), (-a, b)]
-                .iter()
-                .all(|&(x, y)| self.on_photo(x, y))
-        };
+        }
+        let fits = |a: f32, b: f32| self.rect_on_photo(-a, -b, a, b);
         // For a ratio r of half-width to half-height, the largest half-height.
         let reach = self.width.max(self.height) * 2.0;
         let largest = |r: f32| {
@@ -1310,6 +1413,21 @@ impl Warp {
         let b = largest(r);
         ((2.0 * b * r).max(1.0), (2.0 * b).max(1.0))
     }
+}
+
+/// The `ρ ≥ 0` with `ρ · (1 + c · ρ²) = target`, for `c ≥ 0`. The left side
+/// rises and curves up, so Newton's method from `ρ = target`, which is at or
+/// past the root, closes in from above without overshooting.
+fn solve_radius(c: f32, target: f32) -> f32 {
+    let mut rho = target;
+    for _ in 0..16 {
+        let step = (rho * (1.0 + c * rho * rho) - target) / (1.0 + 3.0 * c * rho * rho);
+        rho -= step;
+        if step.abs() < 1.0e-7 {
+            break;
+        }
+    }
+    rho
 }
 
 /// The map that takes the photo's rectangle to the keystoned quad: the top
@@ -1652,20 +1770,17 @@ impl FrameSpace {
         }
     }
 
-    /// A point given in fractions of the usable rectangle lies on the photo.
-    fn on_photo(&self, fx: f32, fy: f32) -> bool {
-        // Offsets from the centre, which the usable rectangle shares.
-        self.warp
-            .on_photo((fx - 0.5) * self.uw, (fy - 0.5) * self.uh)
-    }
-
+    /// The frame lies on the photo. Fractions of the usable rectangle become
+    /// offsets from the centre, which the usable rectangle shares.
     fn fits(&self, frame: Frame) -> bool {
         frame.w >= MIN_FRAME * 0.999
             && frame.h >= MIN_FRAME * 0.999
-            && self.on_photo(frame.x, frame.y)
-            && self.on_photo(frame.x + frame.w, frame.y)
-            && self.on_photo(frame.x, frame.y + frame.h)
-            && self.on_photo(frame.x + frame.w, frame.y + frame.h)
+            && self.warp.rect_on_photo(
+                (frame.x - 0.5) * self.uw,
+                (frame.y - 0.5) * self.uh,
+                (frame.x + frame.w - 0.5) * self.uw,
+                (frame.y + frame.h - 0.5) * self.uh,
+            )
     }
 
     /// The frame furthest along `make(0) → make(1)` that still fits.
@@ -2130,6 +2245,12 @@ mod tests {
             adj.clarity = 0.0;
             adj.rotation = 5.0;
             time("rotate", &|| { run(&image, &adj, &opts); });
+            adj.rotation = 0.0;
+            adj.distortion = 100.0;
+            time("barrel fix", &|| { run(&image, &adj, &opts); });
+            adj.distortion = -100.0;
+            time("pincushion fix", &|| { run(&image, &adj, &opts); });
+            adj.distortion = 0.0;
             time("rgba8", &|| { image.to_rgba8(true); });
             time("histogram", &|| { image.histogram_region(0, 0, w, h); });
         }
@@ -2217,7 +2338,7 @@ mod tests {
 
     #[test]
     fn vertical_keystone_widens_the_top_and_keeps_lines_straight() {
-        let warp = Warp::new(0.0, 40.0, 0.0, 400.0, 300.0);
+        let warp = Warp::new(0.0, 40.0, 0.0, 0.0, 400.0, 300.0);
         let (tl, _) = warp.forward(-200.0, -150.0);
         let (bl, _) = warp.forward(-200.0, 150.0);
         // The top edge spreads to 1 + 0.5 · 0.4 of its width, the bottom
@@ -2246,7 +2367,7 @@ mod tests {
     #[test]
     fn the_usable_rectangle_of_a_keystone_lies_on_the_photo_and_touches_it() {
         for (rotation, vertical, horizontal) in [(0.0, 30.0, 0.0), (0.0, 0.0, -45.0), (6.0, -20.0, 15.0)] {
-            let warp = Warp::new(rotation, vertical, horizontal, 400.0, 300.0);
+            let warp = Warp::new(rotation, vertical, horizontal, 0.0, 400.0, 300.0);
             let (uw, uh) = warp.usable();
             let corners = |a: f32, b: f32| [(-a, -b), (a, -b), (a, b), (-a, b)];
             for (x, y) in corners(uw * 0.5, uh * 0.5) {
@@ -2260,6 +2381,64 @@ mod tests {
             let image = flat(400, 300, [0.3, 0.3, 0.3]);
             let out = crop_frame(&image, &warp, Frame::default());
             assert!(out.rgb.iter().all(|v| (v - 0.3).abs() < 1.0e-3), "empty pixel in the crop");
+        }
+    }
+
+    #[test]
+    fn distortion_bends_lines_back_and_keeps_the_centre() {
+        // Positive straightens a barrel lens: the corners move out more than
+        // the middle of an edge, so a point reads from nearer the centre.
+        let warp = Warp::new(0.0, 0.0, 0.0, 100.0, 400.0, 300.0);
+        // The photo's corner sits on the half-diagonal, ρ = 1, and is shown
+        // at 1 + c of its radius.
+        let (fx, fy) = warp.forward(200.0, 150.0);
+        assert!((fx - 200.0 * (1.0 + DISTORTION)).abs() < 1.0e-2, "{fx}");
+        assert!((fy - 150.0 * (1.0 + DISTORTION)).abs() < 1.0e-2, "{fy}");
+        assert_eq!(warp.source(0.0, 0.0), (0.0, 0.0));
+        // Even at full strength the map is one to one: no point beyond the
+        // corner reads back onto the photo.
+        let (bx, by) = warp.source(200.0 * 2.0, 150.0 * 2.0);
+        assert!(bx > 200.0 && by > 150.0, "folded back: {bx},{by}");
+        // Forward, then back.
+        for (x, y) in [(200.0f32, 150.0f32), (-37.0, 81.0), (0.0, -150.0)] {
+            let (fx, fy) = warp.forward(x, y);
+            let (bx, by) = warp.source(fx, fy);
+            assert!((bx - x).abs() < 1.0e-2 && (by - y).abs() < 1.0e-2, "{x},{y} → {bx},{by}");
+        }
+        // Negative pulls the corners in instead.
+        let pincushion = Warp::new(0.0, 0.0, 0.0, -100.0, 400.0, 300.0);
+        let (fx, _) = pincushion.forward(200.0, 150.0);
+        assert!(fx < 200.0);
+    }
+
+    #[test]
+    fn a_barrel_fix_bows_the_border_in_and_the_frame_stays_on_the_photo() {
+        // The middle of the top edge moves out less than the corners, so a
+        // rectangle with its corners on the photo would cut through empty
+        // canvas. The usable rectangle and the crop must not.
+        for (rotation, distortion) in [(0.0, 100.0), (0.0, -100.0), (8.0, 60.0)] {
+            let warp = Warp::new(rotation, 15.0, 0.0, distortion, 400.0, 300.0);
+            let (uw, uh) = warp.usable();
+            assert!(warp.rect_on_photo(-uw * 0.5, -uh * 0.5, uw * 0.5, uh * 0.5));
+            assert!(!warp.rect_on_photo(-uw * 0.505, -uh * 0.505, uw * 0.505, uh * 0.505));
+            let image = flat(400, 300, [0.3, 0.3, 0.3]);
+            let out = crop_frame(&image, &warp, Frame::default());
+            assert!(
+                out.rgb.iter().all(|v| (v - 0.3).abs() < 1.0e-3),
+                "{rotation}° {distortion}: empty pixel in the crop"
+            );
+            // The box holds the whole photo: no photo pixel is cut off.
+            let canvas = warp_canvas(&image, &warp);
+            let shown: f32 = canvas.rgb.iter().step_by(3).filter(|v| **v > 0.0).count() as f32;
+            assert!(shown > 0.0);
+            let [x0, y0, x1, y1] = warp.bounds();
+            for i in 0..=8 {
+                let t = -1.0 + i as f32 / 4.0;
+                for (sx, sy) in [(200.0 * t, -150.0), (200.0, 150.0 * t), (200.0 * t, 150.0), (-200.0, 150.0 * t)] {
+                    let (x, y) = warp.forward(sx, sy);
+                    assert!(x >= x0 - 0.01 && x <= x1 + 0.01 && y >= y0 - 0.01 && y <= y1 + 0.01);
+                }
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 
 Status: idea. Not part of the viewer.
 
-Horizon is a small rotation that levels the picture. Frame is the rectangle kept from that leveled picture. The keystone sliders, Vertical and Horizontal in `Edit - perspective.md`, join the same resample before the turn. Everything below about the usable rectangle, the snap, and the frame holds for the keystoned photo too, with the usable rectangle found numerically there. They run after every tone and color control, and they run in that order: rotate, then cut. Cutting first and rotating afterward leaves empty corners, and the cut is no longer the picture the user framed.
+Horizon is a small rotation that levels the picture. Frame is the rectangle kept from that leveled picture. The lens correction, Distortion in `Edit - lens distortion.md`, and the keystone sliders, Vertical and Horizontal in `Edit - perspective.md`, join the same resample before the turn. Everything below about the usable rectangle, the snap, and the frame holds for the keystoned photo too, with the usable rectangle found numerically there. They run after every tone and color control, and they run in that order: rotate, then cut. Cutting first and rotating afterward leaves empty corners, and the cut is no longer the picture the user framed.
 
 EXIF orientation has already been applied at decode. Mirror and the 90° quarter turns, in the assumptions note, have already been applied as the first pipeline step. They copy pixels and do not resample. Horizon is the small angle after that, not another 90° turn.
 
