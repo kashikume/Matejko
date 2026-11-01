@@ -231,6 +231,8 @@ enum Prompt {
 
 /// Two presses on the same slider within this reset it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// In edit mode the wheel zooms out to this fraction of the fitted size.
+const EDIT_MIN_ZOOM: f32 = 0.1;
 /// The full-size render waits this long after the last wheel step on a
 /// slider. Each step shows the drag-size picture at once.
 const WHEEL_SETTLE: Duration = Duration::from_millis(250);
@@ -2128,17 +2130,17 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                let window = if self.editing.is_some() {
-                    self.picture_window()
+                let cursor = self.cursor_or_center();
+                let factor = 1.1_f32.powf(steps);
+                if self.editing.is_some() {
+                    // The viewer stops zooming out at the fitted size. Edit
+                    // mode goes further, to see the frame and its margin.
+                    let window = self.picture_window();
+                    self.view
+                        .zoom_at_down_to(cursor, factor, image, window, EDIT_MIN_ZOOM);
                 } else {
-                    self.window_size
-                };
-                self.view.zoom_at(
-                    self.cursor_or_center(),
-                    1.1_f32.powf(steps),
-                    image,
-                    window,
-                );
+                    self.view.zoom_at(cursor, factor, image, self.window_size);
+                }
                 self.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {

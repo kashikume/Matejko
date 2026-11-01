@@ -55,6 +55,20 @@ impl View {
     /// Zoom-out stops at the fitted size, so the picture never becomes
     /// smaller than the window on both axes. Zoom-in stops at `MAX_SCALE`.
     pub fn zoom_at(&mut self, cursor: Vec2, factor: f32, image: Vec2, window: Vec2) {
+        self.zoom_at_down_to(cursor, factor, image, window, 1.0);
+    }
+
+    /// Wheel zoom whose zoom-out stops at `floor` times the fitted size.
+    /// A floor of 1 is `zoom_at`. Below 1 the picture may shrink inside the
+    /// window, still anchored on the cursor, and does not snap back to fit.
+    pub fn zoom_at_down_to(
+        &mut self,
+        cursor: Vec2,
+        factor: f32,
+        image: Vec2,
+        window: Vec2,
+        floor: f32,
+    ) {
         if !factor.is_finite() || factor <= 0.0 {
             return;
         }
@@ -63,16 +77,21 @@ impl View {
             return;
         }
         let raw = self.scale * factor;
+        let min_scale = fit_scale * floor.min(1.0);
         if factor < 1.0 {
-            if self.scale <= fit_scale {
-                return;
-            }
-            if raw <= fit_scale {
-                self.fit(image, window);
+            if floor >= 1.0 {
+                if self.scale <= fit_scale {
+                    return;
+                }
+                if raw <= fit_scale {
+                    self.fit(image, window);
+                    return;
+                }
+            } else if self.scale <= min_scale * (1.0 + 1e-4) {
                 return;
             }
         }
-        let scale = raw.min(MAX_SCALE.max(fit_scale));
+        let scale = raw.max(min_scale).min(MAX_SCALE.max(fit_scale));
         if (scale - self.scale).abs() <= 1e-4 * self.scale.max(1.0) {
             return;
         }
@@ -223,6 +242,29 @@ mod tests {
         let center_after = view.image_point(Vec2::new(200.0, 100.0));
         assert!(close(center.x, center_after.x));
         assert!(close(center.y, center_after.y));
+    }
+
+    #[test]
+    fn a_floor_below_one_lets_the_picture_shrink_inside_the_window() {
+        let image = Vec2::new(400.0, 200.0);
+        let window = Vec2::new(200.0, 200.0);
+        let mut view = View::new();
+        view.fit(image, window);
+        let cursor = Vec2::new(60.0, 90.0);
+        let before = view.image_point(cursor);
+        view.zoom_at_down_to(cursor, 0.5, image, window, 0.1);
+        assert!(close(view.scale, 0.25));
+        assert!(!view.fitted);
+        let after = view.image_point(cursor);
+        assert!(close(before.x, after.x) && close(before.y, after.y));
+        // It stops at a tenth of the fitted size.
+        for _ in 0..20 {
+            view.zoom_at_down_to(cursor, 0.5, image, window, 0.1);
+        }
+        assert!(close(view.scale, 0.05));
+        // Zooming in passes the fitted size without snapping to it.
+        view.zoom_at_down_to(cursor, 12.0, image, window, 0.1);
+        assert!(close(view.scale, 0.6) && !view.fitted);
     }
 
     #[test]
