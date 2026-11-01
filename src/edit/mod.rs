@@ -1,4 +1,4 @@
-//! Non-destructive JPEG edit. The notes in `docs/ideas/edit` are the spec.
+//! Non-destructive JPEG edit. The notes in `docs/edit` are the spec.
 
 mod files;
 mod image;
