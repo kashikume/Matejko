@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Local};
-use exif::{Error as ExifError, Exif, In, Reader as ExifReader, Tag};
+use exif::{Error as ExifError, Exif, In, Reader as ExifReader, Tag, Value};
 
 use crate::catalog::is_video;
 use crate::transport::format_clock;
@@ -84,8 +84,55 @@ pub fn format_image_info(
     }
 
     lines.push(String::new());
+    if gps_coordinates(path).is_some() {
+        lines.push("M to show on Google Maps".into());
+    }
     lines.push("Esc or I to close".into());
     lines.join("\n")
+}
+
+/// Latitude and longitude in signed decimal degrees, when a photo's EXIF has
+/// a usable GPS position. South and west are negative.
+pub fn gps_coordinates(path: &Path) -> Option<(f64, f64)> {
+    if is_video(path) {
+        return None;
+    }
+    let exif = read_exif(path).ok()?;
+    let lat = gps_degrees(&exif, Tag::GPSLatitude, Tag::GPSLatitudeRef, b'S')?;
+    let lon = gps_degrees(&exif, Tag::GPSLongitude, Tag::GPSLongitudeRef, b'W')?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some((lat, lon))
+}
+
+/// The Google Maps address that drops a pin on the coordinates.
+pub fn maps_url((lat, lon): (f64, f64)) -> String {
+    format!("https://www.google.com/maps/search/?api=1&query={lat:.6},{lon:.6}")
+}
+
+fn gps_degrees(exif: &Exif, tag: Tag, ref_tag: Tag, negative: u8) -> Option<f64> {
+    let field = exif.get_field(tag, In::PRIMARY)?;
+    // Degrees, minutes, seconds. Some writers leave out the seconds.
+    let Value::Rational(parts) = &field.value else {
+        return None;
+    };
+    if parts.is_empty() || parts.iter().any(|part| part.denom == 0) {
+        return None;
+    }
+    let degrees: f64 = parts
+        .iter()
+        .zip([1.0, 60.0, 3600.0])
+        .map(|(part, scale)| part.to_f64() / scale)
+        .sum();
+    let south_or_west = exif
+        .get_field(ref_tag, In::PRIMARY)
+        .and_then(|field| match &field.value {
+            Value::Ascii(strings) => strings.first().and_then(|s| s.first().copied()),
+            _ => None,
+        })
+        .is_some_and(|letter| letter.eq_ignore_ascii_case(&negative));
+    Some(if south_or_west { -degrees } else { degrees })
 }
 
 enum ExifStatus {
@@ -351,6 +398,89 @@ mod tests {
         assert!(text.contains("phone.jpg"), "{text}");
         assert!(text.contains("Format JPEG"), "{text}");
         assert!(text.contains("Orientation"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn write_jpeg_with_gps(path: &Path, lat: (&[u8], [u32; 3]), lon: (&[u8], [u32; 3])) {
+        use exif::experimental::Writer;
+        use exif::{Field, Rational};
+
+        let dms = |parts: [u32; 3]| {
+            Value::Rational(
+                parts
+                    .iter()
+                    .map(|&n| Rational::from((n, 1)))
+                    .collect(),
+            )
+        };
+        let fields = [
+            Field {
+                tag: Tag::GPSLatitudeRef,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![lat.0.to_vec()]),
+            },
+            Field {
+                tag: Tag::GPSLatitude,
+                ifd_num: In::PRIMARY,
+                value: dms(lat.1),
+            },
+            Field {
+                tag: Tag::GPSLongitudeRef,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![lon.0.to_vec()]),
+            },
+            Field {
+                tag: Tag::GPSLongitude,
+                ifd_num: In::PRIMARY,
+                value: dms(lon.1),
+            },
+        ];
+        let mut writer = Writer::new();
+        for field in &fields {
+            writer.push_field(field);
+        }
+        let mut tiff = Cursor::new(Vec::new());
+        writer.write(&mut tiff, true).unwrap();
+        let tiff = tiff.into_inner();
+
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode(&[0; 12], 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let length = (tiff.len() + 8) as u16;
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(b"Exif\0\0");
+        out.extend_from_slice(&tiff);
+        out.extend_from_slice(&jpeg[2..]);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn gps_coordinates_are_signed_decimal_degrees() {
+        let dir = temp_dir("gps");
+        let path = dir.join("trip.jpg");
+        write_jpeg_with_gps(&path, (b"S", [33, 51, 36]), (b"W", [70, 30, 0]));
+        let (lat, lon) = gps_coordinates(&path).unwrap();
+        assert!((lat + 33.86).abs() < 1e-9, "{lat}");
+        assert!((lon + 70.5).abs() < 1e-9, "{lon}");
+        assert_eq!(
+            maps_url((lat, lon)),
+            "https://www.google.com/maps/search/?api=1&query=-33.860000,-70.500000"
+        );
+        let text = format_image_info(&path, Some((2, 2)), None);
+        assert!(text.contains("M to show on Google Maps"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn photos_without_gps_have_no_coordinates() {
+        let dir = temp_dir("nogps");
+        let path = dir.join("phone.jpg");
+        write_jpeg_with_orientation(&path, 1);
+        assert_eq!(gps_coordinates(&path), None);
+        let text = format_image_info(&path, Some((2, 2)), None);
+        assert!(!text.contains("Google Maps"), "{text}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

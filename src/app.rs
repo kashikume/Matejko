@@ -27,7 +27,7 @@ use crate::edit::{
 };
 use crate::gpu::{Label, LabelAlign};
 use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
-use crate::info::format_image_info;
+use crate::info::{format_image_info, gps_coordinates, maps_url};
 use crate::playback::VideoSession;
 use crate::transport::{self, Hit};
 use crate::view::{Vec2, View};
@@ -49,6 +49,7 @@ pub enum Command {
     Help,
     Info,
     OpenWith,
+    Map,
     Pause,
     Edit,
 }
@@ -80,6 +81,7 @@ pub enum Action {
     ShowHelp,
     ShowInfo,
     OpenWith,
+    OpenMap,
     CancelOverlay,
     TogglePause,
     EnterEdit,
@@ -132,6 +134,7 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::Help) => Action::ShowHelp,
         (Mode::Viewing { .. }, Command::Info) => Action::ShowInfo,
         (Mode::Viewing { .. }, Command::OpenWith) => Action::OpenWith,
+        (Mode::Viewing { .. } | Mode::Info, Command::Map) => Action::OpenMap,
         (Mode::Viewing { .. }, Command::Pause) => Action::TogglePause,
         (Mode::Viewing { .. }, Command::Edit) => Action::EnterEdit,
         (Mode::Editing, Command::Escape) => Action::ExitEdit { escape: true },
@@ -165,6 +168,7 @@ Drag\tpan
 
 I\tfile information
 O\topen with another app
+M\tshow the GPS location on Google Maps
 E\tedit a JPEG
 Delete\tdelete the file
 F1\tshow or hide this help"
@@ -453,6 +457,7 @@ impl App {
                 self.request_redraw();
             }
             Action::OpenWith => self.open_with_current(),
+            Action::OpenMap => self.open_map_for_current(),
             Action::DoDelete => self.delete_current(event_loop),
             Action::CancelOverlay => {
                 self.prompt = None;
@@ -462,6 +467,38 @@ impl App {
             Action::TogglePause => self.toggle_video_pause(),
             Action::EnterEdit => self.begin_edit(),
             Action::ExitEdit { escape } => self.exit_edit_key(escape),
+        }
+    }
+
+    fn open_map_for_current(&self) {
+        if self.catalog.is_empty() {
+            return;
+        }
+        let Some(coordinates) = gps_coordinates(&self.catalog.current_path()) else {
+            return;
+        };
+        let url: Vec<u16> = OsStr::new(&maps_url(coordinates))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let hwnd = self
+            .window
+            .as_ref()
+            .and_then(|window| window_hwnd(window))
+            .unwrap_or(std::ptr::null_mut());
+        unsafe {
+            let _ = ShellExecuteW(
+                hwnd,
+                verb.as_ptr(),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
         }
     }
 
@@ -2454,6 +2491,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::F1) => Some(Command::Help),
         Key::Character(ch) if ch.eq_ignore_ascii_case("i") => Some(Command::Info),
         Key::Character(ch) if ch.eq_ignore_ascii_case("o") => Some(Command::OpenWith),
+        Key::Character(ch) if ch.eq_ignore_ascii_case("m") => Some(Command::Map),
         Key::Character(ch) if ch.eq_ignore_ascii_case("e") => Some(Command::Edit),
         Key::Named(NamedKey::Space) => Some(Command::Pause),
         _ => None,
@@ -2540,6 +2578,9 @@ struct Point {
 /// Open the file after the user picks an app in the Open With dialog.
 const OAIF_EXEC: u32 = 0x4;
 
+/// Show the browser window that opens the map.
+const SW_SHOWNORMAL: i32 = 1;
+
 #[repr(C)]
 struct OpenAsInfo {
     file: *const u16,
@@ -2556,6 +2597,14 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn SHOpenWithDialog(hwnd_parent: *mut std::ffi::c_void, info: *const OpenAsInfo) -> i32;
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> *mut std::ffi::c_void;
 }
 
 fn window_hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
@@ -2712,6 +2761,15 @@ mod tests {
             action_for(Command::OpenWith, Mode::Confirming, false),
             Action::None
         );
+        assert_eq!(action_for(Command::Map, viewing, false), Action::OpenMap);
+        assert_eq!(action_for(Command::Map, viewing, true), Action::None);
+        assert_eq!(action_for(Command::Map, Mode::Info, false), Action::OpenMap);
+        assert_eq!(action_for(Command::Map, Mode::Help, false), Action::None);
+        assert_eq!(
+            action_for(Command::Map, Mode::Confirming, false),
+            Action::None
+        );
+        assert_eq!(action_for(Command::Map, Mode::Editing, false), Action::None);
         assert_eq!(
             action_for(Command::Pause, viewing, false),
             Action::TogglePause

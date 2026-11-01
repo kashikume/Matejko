@@ -105,6 +105,7 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Same as Exit. Ignored while the unsaved-changes question is up |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored | Ignored |
 | O | Open With dialog for the current file | Ignored | Ignored | Ignored |
+| M | Open the photo's EXIF GPS position in Google Maps in the default browser. Ignored without GPS. | Same as Viewing while info is open; ignored in help | Ignored | Ignored |
 | F1 | Open help | Close help if help is open; otherwise ignored | Ignored | Ignored |
 | Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored | Ignored |
 | Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Same as Exit. While the unsaved-changes question is up, Keep editing |
@@ -118,7 +119,7 @@ F1 dims the picture and draws the app name and version above the key list in the
 
 ### Information
 
-I dims the picture and draws a summary for the current file: name, folder, file size, modified and created times, format, and pixel size. A photo also lists available EXIF (camera, lens, taken time, exposure, focal length, flash, orientation, software, artist, copyright, GPS when present). A video lists duration instead of EXIF. Escape or I closes it and does not quit. I is ignored during delete confirmation and while help is open.
+I dims the picture and draws a summary for the current file: name, folder, file size, modified and created times, format, and pixel size. A photo also lists available EXIF (camera, lens, taken time, exposure, focal length, flash, orientation, software, artist, copyright, GPS when present). A video lists duration instead of EXIF. When the photo has a GPS position, the info also says `M to show on Google Maps`; M opens `https://www.google.com/maps/search/?api=1&query=<lat>,<lon>` in decimal degrees, south and west negative. Escape or I closes it and does not quit. I is ignored during delete confirmation and while help is open.
 
 ### Delete flow
 

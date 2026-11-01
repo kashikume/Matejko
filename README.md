@@ -20,6 +20,7 @@ The window title shows the file name and its place in the folder.
 - F1 — show these keys
 - I — show file information
 - O — Open With another app
+- M — show the photo's GPS location on Google Maps, when the EXIF has one
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 - On a video, the bar along the bottom seeks. It hides while the pointer is idle and stays while paused
