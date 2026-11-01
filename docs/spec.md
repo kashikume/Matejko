@@ -2,7 +2,7 @@
 
 Status: accepted. The behavior below is what the first version implements.
 
-Matejko is a Windows photo viewer. It stays small: one window, no menus, no thumbnails, no editing. The user starts it with a path to an image or an MP4. The app shows that file and can move to the other JPEG, PNG, and MP4 files in the same folder.
+Matejko is a Windows photo viewer. It stays small: one window, no menus, no thumbnails. The user starts it with a path to an image or an MP4. The app shows that file and can move to the other JPEG, PNG, and MP4 files in the same folder. `E` on a JPEG opens edit mode on that same window. PNG and video stay view-only.
 
 ## Goals
 
@@ -15,7 +15,7 @@ Matejko is a Windows photo viewer. It stays small: one window, no menus, no thum
 
 - Formats other than JPEG, PNG, and MP4 (no GIF, WebP, HEIC, RAW, or animated PNG).
 - Color profiles. Pixels are treated as sRGB.
-- Thumbnails, slideshows, editing, rename, copy, print, or a folder tree.
+- Thumbnails, slideshows, rename, print, or a folder tree. JPEG editing is the edit mode below, not a separate editor.
 - Remembering window size, zoom, or the last opened file.
 - Registering as the default Windows photo app.
 - A settings file.
@@ -35,7 +35,7 @@ The list includes JPEG, PNG, and MP4 files in that directory. Left and Right mov
 The app watches the image's parent directory (not recursive) for changes made outside Matejko:
 
 - When a supported file appears or disappears, the browse list is rebuilt. The viewer stays on the same path when that file still exists.
-- When the current file's contents change (size or modified time), it is decoded again and shown fitted.
+- When the current file's contents change (size or modified time), it is decoded again and shown fitted. A write during edit mode does not reload the session. The picture on screen stays the edit, and leaving edit mode shows the file as it is on disk.
 - When the current file is removed or renamed away, navigation matches an in-app delete: show the next image, or the previous if it was last, or exit if none remain.
 - Folder events are coalesced for about 100 ms so a single save does not thrash. If the watcher cannot start, the app still runs without live updates.
 
@@ -94,19 +94,20 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 
 ### Keyboard
 
-| Input | Viewing | Help / Info | Delete confirmation |
-| --- | --- | --- | --- |
-| Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored |
-| Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored |
-| Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored |
-| Enter | Toggle fullscreen | Ignored | Confirm delete |
-| Delete | Open confirmation | Ignored | Ignored |
-| I | Open image information | Close info if info is open; otherwise ignored | Ignored |
-| O | Open With dialog for the current file | Ignored | Ignored |
-| F1 | Open help | Close help if help is open; otherwise ignored | Ignored |
-| Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored |
-| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel |
-| Close, Alt+F4 | Quit | Quit | Quit |
+| Input | Viewing | Help / Info | Delete confirmation | Editing |
+| --- | --- | --- | --- | --- |
+| Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored | Ignored |
+| Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored | Ignored |
+| Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored | Ignored |
+| Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored |
+| Delete | Open confirmation | Ignored | Ignored | Ignored |
+| E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Same as Exit. Ignored while the unsaved-changes question is up |
+| I | Open image information | Close info if info is open; otherwise ignored | Ignored | Ignored |
+| O | Open With dialog for the current file | Ignored | Ignored | Ignored |
+| F1 | Open help | Close help if help is open; otherwise ignored | Ignored | Ignored |
+| Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored | Ignored |
+| Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Same as Exit. While the unsaved-changes question is up, Keep editing |
+| Close, Alt+F4 | Quit | Quit | Quit | Quit |
 
 Mouse wheel and drag keep working during help, info, and delete confirmation, so the picture stays visible behind the text.
 
@@ -124,6 +125,14 @@ I dims the picture and draws a summary for the current file: name, folder, file 
 2. Enter moves the file to the Recycle Bin and removes it from the list. It does not toggle fullscreen.
 3. The next image (the one that shifts into the current index) is shown, fitted. If the deleted file was the last in the list, the new last image is shown. If the folder has no images left, the app exits.
 4. Escape returns to viewing with no change. A failed Recycle Bin operation shows the error in the same overlay and leaves the file in place; Escape dismisses the error.
+
+### Edit mode
+
+`E` on a `.jpg` or `.jpeg` opens edit mode. The same key on a PNG or a video does nothing. Exit is a button on the panel, and Escape and E do the same. It asks before dropping unsaved control changes. Confirming leaves the file as it was at the last save and returns to viewing. While that question is up, Escape answers Keep editing and E does nothing, so a second press cannot discard edits. Escape never quits the app from edit mode. The arrows, Delete, and Enter do not leave edit mode.
+
+The panel is a column on the right, starting near a quarter of the window, with a draggable divider. It shows a histogram of the framed picture, a guide button (none, thirds, center, pointer), mirror and 90° buttons, the sliders, JPEG quality, the compare row O / Of / S / Sf, then Save, Save as copy, and Exit. Guides are screen-space lines, one at a time, and they are not saved. O, Of, S, and Sf show that picture only while held. Zoom and pan stay. Unlike the viewer, the wheel zooms out past the fitted size, down to a tenth of it, so the frame and the margin around it can be seen whole. S and Sf do nothing until the open file has a save. Save writes the current controls into the open JPEG. Save as copy opens the Windows Save As dialog in the photo's folder, with `<name>_copy.jpg` filled in. Any folder will do. The dialog asks before replacing a file. A name that is not `.jpg` or `.jpeg`, or the open file itself, is refused with a message on the panel. A copy in another folder takes its baseline along into that folder's `.matejko`. The session stays on the open file.
+
+The baseline is a byte copy in `.matejko`, taken once before the first overwrite. Later versions share that file. Adjustments are a JSON file beside it. The pipeline is the one in `docs/edit`. While a slider or the frame is moving, the run uses a long-side-1600 preview. Releasing, and the 90°, mirror, and shape clicks, run the full baseline. An untouched picture whose quality is still the file's estimate is copied byte for byte. A re-encode is 4:4:4, keeps the other EXIF tags, sets orientation to normal, writes the new pixel size, and appends `edited with Matejko` to Software once.
 
 ### Orientation and decode
 
@@ -210,4 +219,5 @@ src/app.rs
 - Dragging pans without changing scale. Resizing while still fitted refits. Resizing after a zoom keeps the scale.
 - Delete then Escape does not change the file. Delete then Enter moves it to the Recycle Bin, shows the next image, and skips the removed file. Deleting the last remaining image exits.
 - A phone JPEG with orientation 6 is shown rotated upright.
+- `E` on a JPEG opens edit mode. `E` on a PNG or a video does nothing. Exit, Escape, and E leave edit mode, and they ask when the controls differ from the last save. Escape on that question keeps editing. The arrows, Delete, and Enter do not leave edit mode.
 - A missing path shows a message box and exits with code 1, without a console window.

@@ -2,7 +2,7 @@
 
 Status: idea. Not part of the viewer.
 
-Horizon is a small rotation that levels the picture. Frame is the rectangle kept from that leveled picture. They run after every tone and color control, and they run in that order: rotate, then cut. Cutting first and rotating afterward leaves empty corners, and the cut is no longer the picture the user framed.
+Horizon is a small rotation that levels the picture. Frame is the rectangle kept from that leveled picture. The lens correction, Distortion in `Edit - lens distortion.md`, and the keystone sliders, Vertical and Horizontal in `Edit - perspective.md`, join the same resample before the turn. Everything below about the usable rectangle, the snap, and the frame holds for the keystoned photo too, with the usable rectangle found numerically there. They run after every tone and color control, and they run in that order: rotate, then cut. Cutting first and rotating afterward leaves empty corners, and the cut is no longer the picture the user framed.
 
 EXIF orientation has already been applied at decode. Mirror and the 90° quarter turns, in the assumptions note, have already been applied as the first pipeline step. They copy pixels and do not resample. Horizon is the small angle after that, not another 90° turn.
 
@@ -14,9 +14,11 @@ Frame is a rectangle inside the leveled photo. Default is the whole usable pictu
 
 Rotation turns the photo into a quad and leaves empty pixels in the corners of the upright canvas. The frame is an upright rectangle. Every corner of it lies on the photo, inside that quad or on its edge. An empty pixel is never inside the frame.
 
-The usable picture is the largest such rectangle. Its sides touch the rotated photo's edges. That touch is the snap line. Dragging an edge or a corner outward moves the frame until it meets the rotated border, and then the edge sticks there. It does not travel into the empty corner, and it does not stop short of the border while the pointer is still pulling outward. A full frame is that snapped rectangle.
+The usable rectangle is the largest such rectangle. Its sides touch the rotated photo's edges. A full frame is that rectangle. It is not a fence. The frame may reach past it wherever the turned photo does: a tall, narrow frame can rise above it in the middle, where the photo stands higher, and a small frame can move out past its sides halfway down. The only rule is that all four corners lie on the photo.
 
-Changing the angle rebuilds the quad and the snap lines. If a corner of the frame would then sit on an empty pixel, the frame is replaced by the largest upright rectangle of its current ratio that still lies on the photo. A tighter frame that still lies entirely on the photo keeps its place. Free has no ratio: an edge that has crossed into empty pixels is pulled back to the rotated border. A stored fraction outside 0…1 is clamped back onto the usable rectangle before the cut.
+The rotated border is the snap line. Dragging an edge or a corner outward moves the frame until a corner meets the border, and then the edge sticks there. It does not travel into the empty corner, and it does not stop short of the border while the pointer is still pulling outward. A moved frame that meets the border on one side keeps following the pointer along the other axis.
+
+Changing the angle rebuilds the quad and the snap lines. The frame is stored as a fraction of the usable rectangle, so a full frame stays snapped to the new borders, and a tighter frame stays the same fraction of them. A tighter frame that still lies entirely on the photo keeps its place. A frame whose corners are no longer on the photo at the new angle is drawn toward the centered fit, the largest frame of its ratio centered in the usable rectangle, until they are. That fit is always on the photo. Every frame between it and the stored one has its corners between two points on the photo, which is convex, so the search finds the closest frame that fits.
 
 ## Where they sit
 
@@ -28,18 +30,18 @@ The tone pipeline finishes in float. Horizon and frame resample that float image
 
 θ is the angle in degrees. Rotation is about the center of the baseline.
 
-Sampling reads backward, so the output has no holes. For an output point `(x, y)`, with the center `(cx, cy)` and θ in radians:
+Sampling reads backward, so the output has no holes. Coordinates are pixel edges: pixel `i` covers `[i, i + 1)`, and the center is `(W / 2, H / 2)`. Screen y points down. A counterclockwise turn by θ on screen takes a source offset `(dx, dy)` to `(cos θ · dx + sin θ · dy, −sin θ · dx + cos θ · dy)`. The backward read is its inverse. For an output point `(x, y)`, with θ in radians:
 
 ```
 dx = x − cx
 dy = y − cy
-sx =  cos(θ) · dx + sin(θ) · dy + cx
-sy = −sin(θ) · dx + cos(θ) · dy + cy
+sx = cos(θ) · dx − sin(θ) · dy + cx
+sy = sin(θ) · dx + cos(θ) · dy + cy
 ```
 
-`(sx, sy)` is where the sample comes from. The kernel is Catmull–Rom, a cubic on the 4×4 neighborhood. A source coordinate outside the baseline is outside the usable picture and is not part of the frame.
+`(sx, sy)` is where the sample comes from. A dot right of center at θ = +90° lands above center. The kernel is Catmull–Rom, a cubic on the 4×4 neighborhood, centered on `(sx − 0.5, sy − 0.5)` because pixel centers sit at half-integers. An output point whose `(sx, sy)` falls outside the photo is an empty corner and is 0. A tap that reaches past the photo's edge for a point inside it repeats the edge pixel, so the last row of the photo is not darkened by the empty canvas beside it.
 
-θ = 0 skips the resample. The picture is unchanged. The angle comes from the rotation slider.
+θ = 0 skips the resample. The picture is unchanged, and a crop at θ = 0 copies whole pixels with no kernel. The angle comes from the rotation slider.
 
 ## Usable rectangle
 
@@ -72,7 +74,7 @@ The usable rectangle is centered on the rotated picture.
 
 ## Frame
 
-The stored frame is `x`, `y`, `w`, `h`, each in 0…1 of the usable rectangle. Default is `0, 0, 1, 1`.
+The stored frame is `x`, `y`, `w`, `h`, in fractions of the usable rectangle. Default is `0, 0, 1, 1`. At θ = 0 the photo is the usable rectangle, so every value is in 0…1. At other angles a value may fall outside 0…1 where the photo reaches past the rectangle.
 
 ```
 left   = inset_x + x · wr
@@ -101,9 +103,15 @@ The click after 9:16 returns to Original. Edit mode opens on Original. Original 
 
 A 90° turn rotates the picture and the frame together. The stored fractions turn with the pixels. Before the turn they are `(x, y, w, h)` of that picture. After a clockwise turn they are `(1 − y − h, x, h, w)`. A numbered ratio swaps its sides: `3:2` becomes `2:3`, `4:3` becomes `3:4`, `4:5` becomes `5:4`, `16:9` becomes `9:16`, and each of those swaps back on the next turn. `1:1` stays `1:1`. Free stays free. Original stays the word Original, and the picture's own ratio has swapped because the pixels turned. The small rotation is left as it was. If the turned frame would then cover an empty pixel, the fit above runs.
 
-Each click sets the frame to the largest upright rectangle of that ratio that lies inside the rotated photo, centered on the picture. No empty pixel is inside it. Free is the usable rectangle, the largest upright rectangle of any ratio. Dragging then shrinks or moves that rectangle. A numbered ratio keeps its ratio while it is dragged. Free does not. The drag still snaps to the rotated border.
+Each click sets the frame to the largest upright rectangle of that ratio that fits inside the usable rectangle, centered on it. No empty pixel is inside it. Free is the usable rectangle itself, the largest upright rectangle of any ratio. Dragging then resizes or moves that rectangle, anywhere its corners stay on the photo. A numbered ratio keeps its ratio while it is dragged. Free does not. The drag still snaps to the rotated border.
 
-On the picture, the frame is the bright rectangle and the discarded margin is dimmed. The empty corners left by the rotation are part of that margin. They are not a place the frame can sit. The rectangle itself is edited on the picture, and each drag snaps as above. The same angle is a slider on the panel, in the Frame group, −45° to +45°.
+On the picture, the frame is the bright rectangle and the discarded margin is dimmed. The picture on screen is the whole rotated photo, in the upright box that just holds it: `W · |cos θ| + H · |sin θ|` by `W · |sin θ| + H · |cos θ|`, centered where the photo was. No corner of the photo is cut off on screen. The zoom holds the photo's size, so the box grows around it rather than the photo shrinking into it. The empty corners left by the rotation are part of that margin. They are not a place the frame can sit. The rectangle itself is edited on the picture, and each drag snaps as above. The same angle is a slider on the panel, in the Frame group, −45° to +45°.
+
+The pointer on the picture:
+
+- An edge or a corner of the frame, within a few pixels, resizes it. The pointer shows a resize arrow there. A locked ratio holds on screen. A corner follows whichever axis the pointer pulled further. An edge keeps the other axis centered.
+- Inside a frame smaller than the picture, a drag moves the frame.
+- Anywhere else, including inside a frame that is the whole picture, a drag pans. With Shift held, a drag pans everywhere, so a tight frame can still be panned under while zoomed in.
 
 ## Parameters
 
@@ -119,7 +127,7 @@ On the picture, the frame is the bright rectangle and the discarded margin is di
 ## Failure cases worth testing against
 
 - θ = 0 and a full frame. The render matches the tone pipeline output, pixel for pixel. A resample at zero means the skip was missed.
-- Moving the rotation slider to 10°. The whole picture turns counterclockwise and the frame stays upright. A corner that would land on an empty pixel is gone, and the frame is the largest of its ratio that still lies on the photo.
+- Moving the rotation slider to 10°. The whole picture turns counterclockwise and the frame stays upright. A frame whose corner would land on an empty pixel is drawn toward the centered fit of its ratio until it lies on the photo again.
 - Clicking the shape button to 1:1. The frame becomes the largest square inside the rotated photo. A square that leaves a band of photo unused on the long side is the right result. A square that contains an empty corner is not.
 - Aspect `3:2`, then one click of 90°. The picture is on its side and the aspect is `2:3`. The next click returns it to `3:2`. Original stays labeled Original, and its ratio has swapped with the pixels.
 - θ = 10° on a 4:3 phone JPEG. Every output pixel is a photo pixel. An empty corner inside the frame means a drag crossed the rotated border without snapping.

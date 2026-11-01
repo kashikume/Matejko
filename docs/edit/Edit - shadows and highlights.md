@@ -67,6 +67,10 @@ k = j · median(k / j)
 
 A pixel with R, G, and B all at C has nothing to copy. It stays clipped. That is the specular the help leaves alone. The neighborhood starts at 32 px and is internal.
 
+On a JPEG the ceiling is in the file, not in a sensor. A channel counts as clipped when its code is 254 or 255. That is read on the oriented image before White balance, Exposure, and Blackpoint move the values. The ratios are then taken on the values those stages wrote. A rebuilt channel never ends below the value it was clipped at: the true value was at least that.
+
+The medians are taken per 16 px tile, over that tile and its eight neighbors, which reaches about 32 px either side. Every second pixel in each direction is enough for a median. A preview scales the tile with its width.
+
 ### Edge-aware base
 
 ```
@@ -91,6 +95,8 @@ base = mean(a) · L + mean(b)
 r starts at 10% of the short side, inside 5–15%. ε starts at 0.02², in units of diffuse white squared. Both are internal. Where the window contains a hard edge, σ² is large, a stays near 1, and the step remains in the base. The dark side and the bright side then take different base values, which is what keeps a bright line off the roofline. A Gaussian of the same radius shares one base across that step, and the line appears.
 
 A local Laplacian remapped only at the coarsest pyramid level is the same split. The guided filter is the one to code.
+
+The window is hundreds of pixels wide on a phone photo, and the base it produces is smooth. Solve `a` and `b` on a box-averaged copy of L whose short side is about 512 px, with r divided by the same step. Upsample `mean(a)` and `mean(b)` bilinearly, and apply them to the full-resolution L. This is the fast guided filter. The edge still follows the full-resolution guide, because the last step multiplies by L itself. A preview and a render then solve on grids of about the same size, so they agree.
 
 ### Shadow
 
@@ -217,3 +223,4 @@ At and above t_n the hue is the input hue. A neutral has ratios of 1 and stays n
 - Affinity Photo 2 help, “Shadows / Highlights” filter. Stronger manipulation of those regions: reduce contrast, boost shadow detail, recover highlight detail. Range, moved right, includes a greater range of tones.
 - Affinity Photo 2 help, “Basic panel”. Shadows & Highlights applies a tonal adjustment to the darkest and lightest areas.
 - He, Sun, Tang. “Guided Image Filtering.” IEEE Transactions on Pattern Analysis and Machine Intelligence, 2013. The self-guided filter above is this filter.
+- He, Sun. “Fast Guided Filter.” arXiv:1505.00996, 2015. Coefficients solved on a subsampled guide, upsampled, and applied at full resolution.

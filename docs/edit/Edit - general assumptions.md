@@ -4,7 +4,7 @@ Status: draft. Not part of the viewer. Open points are at the end.
 
 Edit mode is a second state of the same window, for a quick correction of a camera photo. The files in mind are JPEGs from phones. The app remains a viewer. E enters edit mode on a JPEG. That key does nothing today, and it does nothing on a PNG.
 
-The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the sliders in four groups: Light, Color, Detail, and Frame. JPEG quality is at the bottom. Save, Save as copy, and Exit are buttons on that panel. Four small buttons sit with them, in one row: O, Of, S, and Sf. The split starts with the picture at about three quarters of the width, and the divider drags. Rotation is the slider in Frame, from −45° to +45°. It turns the whole picture. A button beside it cycles the frame's shape: Original, Free, 3:2, 2:3, and the other ratios in the frame note. Each click fits the largest rectangle of that shape that still lies on the rotated photo. The kept rectangle is dragged on the picture. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed. Guides can be drawn over the picture. They are not adjustments and they are not saved. `Edit - screen guides.md`. The layout is drawn in `Edit - wireframe.canvas.tsx`.
+The picture stays the picture: black background, fit, zoom, and pan. A panel on the right holds a histogram, then the mirror and quarter-turn buttons, then the sliders in four groups: Light, Color, Detail, and Frame. JPEG quality is at the bottom. Save, Save as copy, and Exit are buttons on that panel. Four small buttons sit with them, in one row: O, Of, S, and Sf. The split starts with the picture at about three quarters of the width, and the divider drags. Rotation is the slider in Frame, from −45° to +45°. It turns the whole picture. A button beside it cycles the frame's shape: Original, Free, 3:2, 2:3, and the other ratios in the frame note. Each click fits the largest rectangle of that shape inside the usable rectangle, on the rotated photo. The kept rectangle is dragged on the picture. The drag snaps to the rotated photo's edges, so the empty corners left by the rotation never enter the frame. The margin outside the frame is dimmed. Guides can be drawn over the picture. They are not adjustments and they are not saved. `Edit - screen guides.md`.
 
 ## What is edited
 
@@ -50,7 +50,9 @@ Save writes over the file that is open. It does this in order:
 3. Write `.matejko/<stem of the open file>.matejko_adj` from the controls as they are now. Its `original` field is the original file name.
 4. Render the baseline plus that adj over the open file.
 
-Save as copy asks for a file name in the same folder and writes a new JPEG there. The open file is left as it is. The same first two steps create the baseline when the open file is still the untouched original. The adj is `.matejko/<stem of the new name>.matejko_adj`, and its `original` field is that same original file name. The render goes to the new name. A second version adds another JPEG and another adj, and the baseline stays the one file. If the chosen name is already in the folder, the user confirms before that JPEG and its adj are replaced.
+Save as copy asks for a file name with the Windows Save As dialog, which opens in the photo's folder, and writes a new JPEG there. Any folder will do. The open file is left as it is. The same first two steps create the baseline when the open file is still the untouched original. The adj is `.matejko/<stem of the new name>.matejko_adj`, and its `original` field is that same original file name. The render goes to the new name. A second version adds another JPEG and another adj, and the baseline stays the one file. If the chosen name is already in the folder, the user confirms before that JPEG and its adj are replaced.
+
+A copy in another folder writes nothing beside the open photo. It gets a `.matejko` of its own in its folder, created if needed, and a byte copy of the session's baseline there, so a later visit to the copy finds everything it needs in one folder. A baseline of that name already there with the same bytes is reused. One with other bytes belongs to a different photo and is left alone: the copy's baseline takes the next free name, `<stem>_2.jpg`, `<stem>_3.jpg`, and so on, and the adj's `original` field names it.
 
 On a later visit, adj and baseline both present: decode `.matejko/<original>`, apply the adj. The browsed file is ignored for the edit session, even when it is a previous render of these same numbers. Applying the adj to the render would bake the edit twice.
 
@@ -70,8 +72,8 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "quarter_turns": 0,
     "mirror_horizontal": false,
     "mirror_vertical": false,
-    "temperature": 0,
-    "tint": 0,
+    "temperature": 0.0,
+    "tint": 0.0,
     "exposure_ev": 0.0,
     "blackpoint": 0.0,
     "shadow": 0,
@@ -82,6 +84,9 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
     "saturation": 0,
     "clarity": 0,
     "rotation": 0.0,
+    "vertical": 0,
+    "horizontal": 0,
+    "distortion": 0,
     "aspect": "original",
     "frame": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
     "jpeg_quality": 90
@@ -89,7 +94,7 @@ No adj and no baseline: the open file is the original. Decode it. The baseline i
 }
 ```
 
-`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (stops for exposure, degrees for rotation, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `aspect` is `original`, `free`, or one of the ratios in the frame note. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
+`version` is 1. `original` is the baseline's file name, including its extension, as in the tree above. Unknown versions are refused rather than half-applied. Values are the slider units from the control notes (−100…+100 for temperature and tint, stops for exposure, degrees for rotation, −100…+100 for vertical, horizontal, and distortion, fractions of the usable rectangle for the frame, −100…+100 for the others, except shadow and highlight, which use their own notes). `quarter_turns` is 0, 1, 2, or 3. The two mirror fields are booleans. `aspect` is `original`, `free`, or one of the ratios in the frame note. `jpeg_quality` is an integer from 1 to 100. The `90` in the sample is the number read from that file, not a fixed default.
 
 One value per control, in the pipeline order below. The stack is that pipeline, run from the baseline. It is not a list the user reorders, and it is not one entry per slider twitch. JPEG quality is stored with them and is not a stage in that stack.
 
@@ -176,7 +181,7 @@ Each preview and each render is one run. A control at its default is skipped. Th
 | 8 | Vibrance | Encode, formula, decode. | `Edit - vibrance.md` |
 | 9 | Saturation | Encode, formula, decode. | `Edit - saturation.md` |
 | 10 | Clarity | Encode to a linear-sized luma, filter, restore chroma, decode. A new buffer becomes work. | `Edit - clarity.md` |
-| 11–12 | Horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - frame and horizon.md` |
+| 11–12 | Lens distortion, perspective, and horizon, then frame | One resample from the linear work image into a new linear image the size of the frame. | `Edit - lens distortion.md`, `Edit - perspective.md`, `Edit - frame and horizon.md` |
 
 ### Orient
 
@@ -208,7 +213,7 @@ The output sample is the baseline sample at `(sx, sy)`. There is no kernel. All 
 
 ### Horizon and frame
 
-Horizon and frame share one resample, after clarity. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. A source tap outside the oriented image is 0. θ = 0 and a full frame skip the resample: work is already the output. The horizon angle is not a place to turn the picture by 90°.
+Lens distortion, perspective, horizon, and frame share one resample, after clarity. The lens correction comes first, then the keystone, then the turn, then the cut. Sampling reads backward with Catmull–Rom, as `Edit - frame and horizon.md` says. An output point that falls outside the oriented image is 0. A kernel tap past the edge repeats the edge pixel. θ = 0, both keystone sliders and Distortion at 0, and a full frame skip the resample: work is already the output. An adjustment file without `vertical`, `horizontal`, or `distortion` reads them as 0. The horizon angle is not a place to turn the picture by 90°.
 
 ### Preview
 
@@ -256,9 +261,9 @@ The histogram is rebuilt at the end of the same run that updates the picture. Wh
 
 ## Leaving edit mode
 
-E enters. Exit is a button on the edit panel, labeled Exit. It is the only way out of the mode.
+E enters. Exit is a button on the edit panel, labeled Exit. Escape and E do what Exit does.
 
-Esc does not leave edit mode, and it does not quit the app from there. In the viewer, Esc still leaves fullscreen or quits. Left, Right, Delete, and Enter do not leave edit mode either. Zoom and pan keep working.
+Esc does not quit the app from edit mode. It leaves edit mode as Exit would, so a second Esc in the viewer is what quits. While the unsaved-changes question is up, Esc answers Keep editing and E does nothing: a key pressed twice in a hurry does not discard edits. Left, Right, Delete, and Enter do not leave edit mode. Zoom and pan keep working.
 
 Exit with nothing unsaved returns to viewing. The browsed file is whatever Save last wrote, or the file that was opened if Save was never used.
 

@@ -57,6 +57,44 @@ pub struct TransportDraw<'a> {
     pub label: &'a str,
 }
 
+pub struct ExtraQuad {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub color: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LabelAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// A line of text placed between `x0` and `x1`, 15 px type on a 22 px line.
+pub struct Label<'a> {
+    pub text: &'a str,
+    pub x0: f32,
+    pub x1: f32,
+    pub top: f32,
+    pub color: [u8; 3],
+    pub align: LabelAlign,
+    /// Wrap onto further lines below instead of running past `x1`.
+    pub wrap: bool,
+}
+
+/// What a label buffer was last shaped for.
+#[derive(Default, PartialEq)]
+struct LabelShape {
+    text: String,
+    width: f32,
+    scale: f32,
+    align: LabelAlign,
+    wrap: bool,
+}
+
 pub struct Frame<'a> {
     pub image_width: f32,
     pub image_height: f32,
@@ -67,6 +105,8 @@ pub struct Frame<'a> {
     pub text: Option<&'a str>,
     pub transport: Option<TransportDraw<'a>>,
     pub scale_factor: f32,
+    pub extra: &'a [ExtraQuad],
+    pub labels: &'a [Label<'a>],
 }
 
 pub struct Gpu {
@@ -107,6 +147,7 @@ struct TextLayer {
     bar_laid_out: String,
     bar_laid_out_width: u32,
     bar_laid_out_scale: f32,
+    label_buffers: Vec<(Buffer, LabelShape)>,
 }
 
 impl Gpu {
@@ -232,7 +273,7 @@ impl Gpu {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vertices"),
-            size: (std::mem::size_of::<Vertex>() * 64) as u64,
+            size: (std::mem::size_of::<Vertex>() * 8192) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -417,7 +458,23 @@ impl Gpu {
         if let Some(transport) = &frame.transport {
             push_transport(&mut vertices, transport, width, height);
         }
+        for quad in frame.extra {
+            push_quad(
+                &mut vertices,
+                quad.x0,
+                quad.y0,
+                quad.x1,
+                quad.y1,
+                width,
+                height,
+                quad.color,
+                false,
+            );
+        }
         let chrome_count = vertices.len() as u32 - chrome_start;
+        if vertices.len() > 8192 {
+            vertices.truncate(8192 / 6 * 6);
+        }
         if !vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
@@ -428,6 +485,7 @@ impl Gpu {
             &self.queue,
             frame.text,
             frame.transport,
+            frame.labels,
             self.config.width,
             self.config.height,
             frame.scale_factor,
@@ -508,6 +566,7 @@ impl TextLayer {
             bar_laid_out: String::new(),
             bar_laid_out_width: 0,
             bar_laid_out_scale: 0.0,
+            label_buffers: Vec::new(),
         }
     }
 
@@ -518,6 +577,7 @@ impl TextLayer {
         queue: &wgpu::Queue,
         text: Option<&str>,
         transport: Option<TransportDraw<'_>>,
+        labels: &[Label<'_>],
         width: u32,
         height: u32,
         scale_factor: f32,
@@ -578,7 +638,39 @@ impl TextLayer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        if text.is_none() && !has_bar {
+        while self.label_buffers.len() < labels.len() {
+            let buffer = Buffer::new(&mut self.font_system, Metrics::new(15.0, 22.0));
+            self.label_buffers.push((buffer, LabelShape::default()));
+        }
+        for (label, (buffer, shaped)) in labels.iter().zip(&mut self.label_buffers) {
+            let shape = LabelShape {
+                text: label.text.to_string(),
+                width: (label.x1 - label.x0).max(1.0),
+                scale,
+                align: label.align,
+                wrap: label.wrap,
+            };
+            // Most labels do not change between frames. Shaping is the cost.
+            if *shaped != shape {
+                buffer.set_wrap(if label.wrap { Wrap::Word } else { Wrap::None });
+                buffer.set_metrics_and_size(
+                    Metrics::new(15.0 * scale, 22.0 * scale),
+                    Some(shape.width),
+                    None,
+                );
+                let attrs = Attrs::new().family(Family::SansSerif);
+                let align = match label.align {
+                    LabelAlign::Left => Align::Left,
+                    LabelAlign::Center => Align::Center,
+                    LabelAlign::Right => Align::Right,
+                };
+                buffer.set_text(label.text, &attrs, Shaping::Advanced, Some(align));
+                *shaped = shape;
+            }
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        if text.is_none() && !has_bar && labels.is_empty() {
             return false;
         }
 
@@ -625,6 +717,18 @@ impl TextLayer {
                 scale: 1.0,
                 bounds,
                 default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            });
+        }
+        for (label, (buffer, _)) in labels.iter().zip(&self.label_buffers) {
+            let [r, g, b] = label.color;
+            areas.push(TextArea {
+                buffer,
+                left: label.x0,
+                top: label.top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(r, g, b),
                 custom_glyphs: &[],
             });
         }
