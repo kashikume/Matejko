@@ -13,7 +13,7 @@ The window title shows the file name and its place in the folder.
 - Left / Right — previous or next file
 - Home / End — first or last file
 - Page Up / Page Down — jump by 10 files
-- Enter — switch between a window and fullscreen
+- Enter or F11 — switch between a window and fullscreen
 - Delete, then Enter — move the current file to the Recycle Bin
 - Space — pause or play a video
 - Escape — cancel a delete, leave fullscreen, or quit

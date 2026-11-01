@@ -41,7 +41,7 @@ The app watches the image's parent directory (not recursive) for changes made ou
 
 ### Window
 
-Enter toggles between a normal window and fullscreen.
+Enter or F11 toggles between a normal window and fullscreen.
 
 ### Delete
 
@@ -100,6 +100,7 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored | Ignored |
 | Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored | Ignored |
 | Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored |
+| F11 | Toggle fullscreen | Ignored | Ignored | Ignored |
 | Delete | Open confirmation | Ignored | Ignored | Ignored |
 | E | Enter edit mode when the current file is a JPEG. Ignored on PNG and video. | Ignored | Ignored | Same as Exit. Ignored while the unsaved-changes question is up |
 | I | Open image information | Close info if info is open; otherwise ignored | Ignored | Ignored |
@@ -113,7 +114,7 @@ Mouse wheel and drag keep working during help, info, and delete confirmation, so
 
 ### Help
 
-F1 dims the picture and draws the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
+F1 dims the picture and draws the app name and version above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
 
 ### Information
 
@@ -214,7 +215,7 @@ src/app.rs
 - Files that are not `.jpg`, `.jpeg`, `.png`, or `.mp4` are absent from the sequence. A JPEG in a subfolder is absent.
 - An MP4 plays fitted, with sound, and keeps its aspect ratio when the window changes size. The wheel zooms the frame and drag pans it. Left and Right move to the neighboring file instead of seeking.
 - Space pauses and resumes a video. The bottom bar seeks. It hides after the pointer is idle and stays while paused.
-- Enter toggles borderless fullscreen on the current monitor. Escape leaves fullscreen and does not quit. Escape in the window quits.
+- Enter or F11 toggles borderless fullscreen on the current monitor. Escape leaves fullscreen and does not quit. Escape in the window quits.
 - The wheel keeps the image point under the cursor fixed, including when the pointer is near a corner and when the image is letterboxed. Zoom-out stops once the image fits the window.
 - Dragging pans without changing scale. Resizing while still fitted refits. Resizing after a zoom keeps the scale.
 - Delete then Escape does not change the file. Delete then Enter moves it to the Recycle Bin, shows the next image, and skips the removed file. Deleting the last remaining image exits.

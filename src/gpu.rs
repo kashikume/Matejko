@@ -140,6 +140,13 @@ struct TextLayer {
     atlas: TextAtlas,
     renderer: TextRenderer,
     buffer: Buffer,
+    /// Keys of a two-column overlay, right-aligned against `buffer`.
+    key_buffer: Buffer,
+    /// Lines of a two-column overlay that have no tab, centered over it.
+    heading_buffer: Buffer,
+    key_left: f32,
+    text_left: f32,
+    heading_left: f32,
     laid_out: String,
     laid_out_width: u32,
     laid_out_scale: f32,
@@ -551,6 +558,8 @@ impl TextLayer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let mut font_system = FontSystem::new();
         let buffer = Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+        let key_buffer = Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
+        let heading_buffer = Buffer::new(&mut font_system, Metrics::new(20.0, 28.0));
         let bar_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
         Self {
             font_system,
@@ -559,6 +568,11 @@ impl TextLayer {
             atlas,
             renderer,
             buffer,
+            key_buffer,
+            heading_buffer,
+            key_left: 0.0,
+            text_left: 0.0,
+            heading_left: 0.0,
             laid_out: String::new(),
             laid_out_width: 0,
             laid_out_scale: 0.0,
@@ -589,22 +603,75 @@ impl TextLayer {
                 || width != self.laid_out_width
                 || (scale - self.laid_out_scale).abs() > 0.01)
         {
-            self.buffer.set_wrap(Wrap::Glyph);
-            self.buffer.set_metrics_and_size(
-                Metrics::new(20.0 * scale, 28.0 * scale),
-                Some(width as f32),
-                None,
-            );
-            let attrs = Attrs::new().family(Family::SansSerif);
-            self.buffer
-                .set_text(overlay, &attrs, Shaping::Advanced, Some(Align::Center));
-            self.buffer.shape_until_scroll(&mut self.font_system, false);
+            let metrics = Metrics::new(20.0 * scale, 28.0 * scale);
+            if overlay.contains('\t') {
+                // Rows of "key\tdescription": keys right-aligned, then a dash,
+                // then descriptions, with the whole block centered. A line
+                // with no tab is a heading. Every column keeps one line per
+                // row, so the rows line up across the three buffers.
+                let mut keys = Vec::new();
+                let mut descriptions = Vec::new();
+                let mut headings = Vec::new();
+                for line in overlay.lines() {
+                    match line.split_once('\t') {
+                        Some((key, description)) => {
+                            keys.push(key);
+                            descriptions.push(format!(" — {description}"));
+                            headings.push("");
+                        }
+                        None => {
+                            keys.push("");
+                            descriptions.push(String::new());
+                            headings.push(line);
+                        }
+                    }
+                }
+                let heading_width = shape_column(
+                    &mut self.heading_buffer,
+                    &mut self.font_system,
+                    &headings.join("\n"),
+                    metrics,
+                    Align::Center,
+                );
+                self.heading_left = ((width as f32 - heading_width) / 2.0).max(0.0);
+                let key_width = shape_column(
+                    &mut self.key_buffer,
+                    &mut self.font_system,
+                    &keys.join("\n"),
+                    metrics,
+                    Align::Right,
+                );
+                let text_width = shape_column(
+                    &mut self.buffer,
+                    &mut self.font_system,
+                    &descriptions.join("\n"),
+                    metrics,
+                    Align::Left,
+                );
+                self.key_left = ((width as f32 - key_width - text_width) / 2.0).max(0.0);
+                self.text_left = self.key_left + key_width;
+            } else {
+                self.buffer.set_wrap(Wrap::Glyph);
+                self.buffer
+                    .set_metrics_and_size(metrics, Some(width as f32), None);
+                let attrs = Attrs::new().family(Family::SansSerif);
+                self.buffer
+                    .set_text(overlay, &attrs, Shaping::Advanced, Some(Align::Center));
+                self.buffer.shape_until_scroll(&mut self.font_system, false);
+                self.key_left = 0.0;
+                self.text_left = 0.0;
+            }
             self.laid_out = overlay.to_string();
             self.laid_out_width = width;
             self.laid_out_scale = scale;
         } else if text.is_some() {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
+            self.key_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.heading_buffer
+                .shape_until_scroll(&mut self.font_system, false);
         }
+        let two_columns = overlay.contains('\t');
 
         let has_bar = transport.is_some();
         let (bar_label, bar_layout) = match transport {
@@ -701,13 +768,29 @@ impl TextLayer {
         if text.is_some() {
             areas.push(TextArea {
                 buffer: &self.buffer,
-                left: 0.0,
+                left: self.text_left,
                 top,
                 scale: 1.0,
                 bounds,
                 default_color: Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
             });
+            if two_columns {
+                for (buffer, left) in [
+                    (&self.key_buffer, self.key_left),
+                    (&self.heading_buffer, self.heading_left),
+                ] {
+                    areas.push(TextArea {
+                        buffer,
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds,
+                        default_color: Color::rgb(255, 255, 255),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
         }
         if let Some(layout) = bar_layout {
             areas.push(TextArea {
@@ -744,6 +827,31 @@ impl TextLayer {
             )
             .is_ok()
     }
+}
+
+/// Lays out one unwrapped line per row, `align`ed within the widest row, and
+/// returns that width.
+fn shape_column(
+    buffer: &mut Buffer,
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: Metrics,
+    align: Align,
+) -> f32 {
+    buffer.set_wrap(Wrap::None);
+    buffer.set_metrics_and_size(metrics, None, None);
+    let attrs = Attrs::new().family(Family::SansSerif);
+    buffer.set_text(text, &attrs, Shaping::Advanced, Some(align));
+    buffer.shape_until_scroll(font_system, false);
+    let widest = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+        .ceil();
+    // Alignment needs a width to align within.
+    buffer.set_size(Some(widest), None);
+    buffer.shape_until_scroll(font_system, false);
+    widest
 }
 
 fn push_transport(

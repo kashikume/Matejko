@@ -42,6 +42,8 @@ pub enum Command {
     PageUp,
     PageDown,
     Enter,
+    /// F11: toggles fullscreen like Enter, but never confirms a delete.
+    Fullscreen,
     Delete,
     Escape,
     Help,
@@ -123,7 +125,7 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::End) => Action::Last,
         (Mode::Viewing { .. }, Command::PageUp) => Action::PageBack,
         (Mode::Viewing { .. }, Command::PageDown) => Action::PageForward,
-        (Mode::Viewing { .. }, Command::Enter) => Action::ToggleFullscreen,
+        (Mode::Viewing { .. }, Command::Enter | Command::Fullscreen) => Action::ToggleFullscreen,
         (Mode::Viewing { .. }, Command::Delete) => Action::AskDelete,
         (Mode::Viewing { fullscreen: true }, Command::Escape) => Action::LeaveFullscreen,
         (Mode::Viewing { fullscreen: false }, Command::Escape) => Action::Quit,
@@ -144,24 +146,29 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
     }
 }
 
-const HELP_TEXT: &str = "\
-Left / Right — previous or next file
-Home / End — first or last file
-Page Up / Page Down — jump by 10 files
-Enter — window or fullscreen
-Delete — delete the file
-I — file information
-O — open with another app
-E — edit a JPEG
-Space — pause or play a video
-Escape — cancel, leave fullscreen, or quit
-F1 — help
-Mouse wheel — zoom at the pointer
-Drag — pan
-Video — a bar along the bottom seeks. It hides after the pointer is idle, and stays while paused
-Fullscreen — the pointer hides at once, then returns for 3 seconds when the mouse is used
+/// One row per line: the key, a tab, then what it does. The overlay lines the
+/// rows up on the dash between the two, and centers a line with no tab.
+const HELP_TEXT: &str = concat!(
+    "Matejko ",
+    env!("CARGO_PKG_VERSION"),
+    "
 
-Esc or F1 to close";
+Left / Right\tprevious or next file
+Home / End\tfirst or last file
+Page Up / Page Down\tjump by 10 files
+
+Enter / F11\twindow or fullscreen
+Space\tpause or play a video
+Esc\tcancel, leave fullscreen, or quit
+Mouse wheel\tzoom at the pointer
+Drag\tpan
+
+I\tfile information
+O\topen with another app
+E\tedit a JPEG
+Delete\tdelete the file
+F1\tshow or hide this help"
+);
 
 const CURSOR_VISIBLE_FOR: Duration = Duration::from_secs(3);
 
@@ -2441,6 +2448,7 @@ fn command_from(key: &Key) -> Option<Command> {
         Key::Named(NamedKey::PageUp) => Some(Command::PageUp),
         Key::Named(NamedKey::PageDown) => Some(Command::PageDown),
         Key::Named(NamedKey::Enter) => Some(Command::Enter),
+        Key::Named(NamedKey::F11) => Some(Command::Fullscreen),
         Key::Named(NamedKey::Delete) => Some(Command::Delete),
         Key::Named(NamedKey::Escape) => Some(Command::Escape),
         Key::Named(NamedKey::F1) => Some(Command::Help),
@@ -2617,6 +2625,14 @@ mod tests {
             Action::ToggleFullscreen
         );
         assert_eq!(action_for(Command::Enter, viewing, true), Action::None);
+        assert_eq!(
+            action_for(Command::Fullscreen, fullscreen, false),
+            Action::ToggleFullscreen
+        );
+        assert_eq!(
+            action_for(Command::Fullscreen, Mode::Confirming, false),
+            Action::None
+        );
         assert_eq!(
             action_for(Command::Delete, viewing, false),
             Action::AskDelete
