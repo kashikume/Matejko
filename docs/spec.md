@@ -116,7 +116,7 @@ Mouse wheel and drag keep working during help, info, and delete confirmation, so
 
 ### Help
 
-F1 dims the picture and draws the app name, version, and platform (`Matejko 0.1.0 (arm64)` or `(x64)`) above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
+F1 dims the picture and draws the app name, version, and platform (`Matejko 0.2.0 (arm64)` or `(x64)`) above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
 
 ### Information
 
