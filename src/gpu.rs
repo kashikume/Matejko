@@ -14,6 +14,10 @@ use winit::window::Window;
 use crate::decode::DecodedImage;
 use crate::transport::Layout;
 
+/// Leading a "key\tdescription" row, draws that row greyed out.
+pub const DIMMED_ROW: char = '\u{1}';
+const DIMMED_COLOR: Color = Color::rgb(188, 188, 188);
+
 const SHADER: &str = r#"
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
@@ -458,7 +462,7 @@ impl Gpu {
                 height,
                 width,
                 height,
-                [0.0, 0.0, 0.0, 0.62],
+                [0.0, 0.0, 0.0, 0.72],
                 false,
             );
         }
@@ -613,23 +617,27 @@ impl TextLayer {
                 let mut descriptions = Vec::new();
                 let mut headings = Vec::new();
                 for line in overlay.lines() {
+                    let (line, dimmed) = match line.strip_prefix(DIMMED_ROW) {
+                        Some(rest) => (rest, true),
+                        None => (line, false),
+                    };
                     match line.split_once('\t') {
                         Some((key, description)) => {
-                            keys.push(key);
-                            descriptions.push(format!(" — {description}"));
-                            headings.push("");
+                            keys.push((key.to_string(), dimmed));
+                            descriptions.push((format!(" — {description}"), dimmed));
+                            headings.push((String::new(), false));
                         }
                         None => {
-                            keys.push("");
-                            descriptions.push(String::new());
-                            headings.push(line);
+                            keys.push((String::new(), false));
+                            descriptions.push((String::new(), false));
+                            headings.push((line.to_string(), false));
                         }
                     }
                 }
                 let heading_width = shape_column(
                     &mut self.heading_buffer,
                     &mut self.font_system,
-                    &headings.join("\n"),
+                    &headings,
                     metrics,
                     Align::Center,
                 );
@@ -637,14 +645,14 @@ impl TextLayer {
                 let key_width = shape_column(
                     &mut self.key_buffer,
                     &mut self.font_system,
-                    &keys.join("\n"),
+                    &keys,
                     metrics,
                     Align::Right,
                 );
                 let text_width = shape_column(
                     &mut self.buffer,
                     &mut self.font_system,
-                    &descriptions.join("\n"),
+                    &descriptions,
                     metrics,
                     Align::Left,
                 );
@@ -831,17 +839,26 @@ impl TextLayer {
 
 /// Lays out one unwrapped line per row, `align`ed within the widest row, and
 /// returns that width.
+/// Shapes one line per `(text, dimmed)` row, dimmed rows in `DIMMED_COLOR`.
 fn shape_column(
     buffer: &mut Buffer,
     font_system: &mut FontSystem,
-    text: &str,
+    rows: &[(String, bool)],
     metrics: Metrics,
     align: Align,
 ) -> f32 {
     buffer.set_wrap(Wrap::None);
     buffer.set_metrics_and_size(metrics, None, None);
     let attrs = Attrs::new().family(Family::SansSerif);
-    buffer.set_text(text, &attrs, Shaping::Advanced, Some(align));
+    let dimmed = attrs.clone().color(DIMMED_COLOR);
+    let mut spans = Vec::new();
+    for (index, (text, dim)) in rows.iter().enumerate() {
+        if index > 0 {
+            spans.push(("\n", attrs.clone()));
+        }
+        spans.push((text.as_str(), if *dim { dimmed.clone() } else { attrs.clone() }));
+    }
+    buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
     buffer.shape_until_scroll(font_system, false);
     let widest = buffer
         .layout_runs()

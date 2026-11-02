@@ -116,7 +116,7 @@ Mouse wheel and drag keep working during help, info, and delete confirmation, so
 
 ### Help
 
-F1 dims the picture and draws the app name, version, and platform (`Matejko 0.2.0 (arm64)` or `(x64)`) above the key list in the center, in the same way as the delete question. Escape or F1 closes it and does not quit.
+F1 dims the picture and draws the app name, version, and platform (`Matejko 0.2.0 (arm64)` or `(x64)`) above the key list in the center, in the same way as the delete question. Keys that do nothing on the current file are greyed out: Space on a photo, M without GPS in the EXIF, and E on anything but a JPEG. Escape or F1 closes it and does not quit.
 
 ### Information
 

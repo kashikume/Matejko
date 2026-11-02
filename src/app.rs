@@ -25,7 +25,7 @@ use crate::edit::{
     Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
     Rendered, SaveTarget, Saved, Slider, Tone, Warp, WorkerEvent,
 };
-use crate::gpu::{Label, LabelAlign};
+use crate::gpu::{Label, LabelAlign, DIMMED_ROW};
 use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
 use crate::info::{format_image_info, gps_coordinates, maps_url};
 use crate::playback::VideoSession;
@@ -1761,13 +1761,32 @@ impl App {
         }
     }
 
+    /// `HELP_TEXT` with the keys that do nothing on the current file greyed out.
+    fn help_text(&self) -> String {
+        let path = self.catalog.current_path();
+        let unavailable = |key: &str| match key {
+            "Space" => !is_video(&path),
+            "M" => gps_coordinates(&path).is_none(),
+            "E" => !is_jpeg(&path),
+            _ => false,
+        };
+        HELP_TEXT
+            .lines()
+            .map(|line| match line.split_once('\t') {
+                Some((key, _)) if unavailable(key) => format!("{DIMMED_ROW}{line}"),
+                _ => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn overlay_text(&self) -> Option<String> {
         if self.catalog.is_empty() {
             return None;
         }
         let name = self.catalog.file_name();
         match &self.prompt {
-            Some(Prompt::Help) => Some(HELP_TEXT.to_string()),
+            Some(Prompt::Help) => Some(self.help_text()),
             Some(Prompt::Info) => {
                 let path = self.catalog.current_path();
                 let pixels = self
