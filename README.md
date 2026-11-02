@@ -21,11 +21,24 @@ The window title shows the file name and its place in the folder.
 - I — show file information
 - O — Open With another app
 - M — show the photo's GPS location on Google Maps, when the EXIF has one
+- E — edit the current JPEG (see Editing below)
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 - On a video, the bar along the bottom seeks. It hides while the pointer is idle and stays while paused
 
 Started without a file, Matejko shows a picture explaining how to open a photo with Open with.
+
+## Editing
+
+E on a JPEG opens edit mode in the same window. PNG and video stay view-only. A panel on the right, with a draggable divider, holds:
+
+- a histogram of the framed picture
+- sliders for the adjustments (exposure, brightness, blackpoint, white balance, and more), frame shape, mirror and 90° rotation buttons, and a composition guide (thirds, center, pointer)
+- JPEG quality
+- a compare row (O / Of / S / Sf) that shows the original or the last save while held
+- Save, Save as copy, and Exit
+
+Save writes the edit into the open JPEG, after keeping a byte-for-byte baseline copy once in a `.matejko` folder beside it. Adjustments are stored there too, so they stay editable. Save as copy writes a new `.jpg` through the Save As dialog. Escape or E exits, and asks first if there are unsaved changes. The wheel can zoom out past the fitted size to show the margin around the frame.
 
 Behavior is specified in [docs/spec.md](docs/spec.md).
 
