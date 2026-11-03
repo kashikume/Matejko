@@ -97,9 +97,9 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 
 | Input | Viewing | Help / Info | Delete confirmation | Editing |
 | --- | --- | --- | --- | --- |
-| Left / Right | Previous / next image. No wrap. Past either end, the key does nothing. | Ignored | Ignored | Ignored |
+| Left / Right | Previous / next image. No wrap. Past either end, a red cross shows on that side. | Ignored | Ignored | Ignored |
 | Home / End | First / last image. Already there, the key does nothing. | Ignored | Ignored | Ignored |
-| Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. | Ignored | Ignored | Ignored |
+| Page Up / Page Down | Jump back / forward by 10 images, stopping at the first or last. Already there, a red cross shows on that side. | Ignored | Ignored | Ignored |
 | Enter | Toggle fullscreen | Ignored | Confirm delete | Ignored |
 | F11 | Toggle fullscreen | Ignored | Ignored | Ignored |
 | Delete | Open confirmation | Ignored | Ignored | Ignored |
@@ -141,6 +141,8 @@ The baseline is a byte copy in `.matejko`, taken once before the first overwrite
 
 - JPEG EXIF orientation is applied when the file is decoded, so phone photos are upright.
 - Decode runs off the UI thread. Until the new image is ready, the previous picture stays on screen. If the user moves on before a decode finishes, that result is discarded.
+- A file that takes longer than 1 second to show (a large photo, or one a cloud drive must download first) gets a blue spinning wheel over the previous picture. It sits at the left edge after a move back (Left, Page Up, Home) and at the right edge after a move forward, vertically centered, and at the center for the file opened at startup. It fades in, and fades out as soon as the new picture or its error is on screen.
+- Left or Page Up on the first file, and Right or Page Down on the last, show a red cross on that side of the window for 2 seconds. It fades in and out. Another press while it is up keeps it there instead of blinking.
 - The decoded image is RGBA8. Zoom and pan only change the draw transform; they do not decode again.
 - The next and previous images may be decoded ahead of time. MP4s are not decoded ahead.
 
@@ -189,6 +191,7 @@ Crates:
 - `playback` — Windows MediaPlayer session, audio, and frame copy.
 - `transport` — video bar layout and hit testing.
 - `gpu` — device, swapchain, texture upload, draw.
+- `indicator` — timing and shapes of the loading wheel and the end-of-list cross.
 - `info` — file and EXIF text for the information overlay.
 - `watch` — directory watcher bridged into the event loop.
 - `app` — event loop, input, confirmation state.

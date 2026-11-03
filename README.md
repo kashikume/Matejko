@@ -10,7 +10,7 @@ cargo run --release -- path\to\photo.jpg
 
 The window title shows the file name and its place in the folder.
 
-- Left / Right — previous or next file
+- Left / Right — previous or next file. Past either end, a red cross flashes on that side
 - Home / End — first or last file
 - Page Up / Page Down — jump by 10 files
 - Enter or F11 — switch between a window and fullscreen
@@ -25,6 +25,8 @@ The window title shows the file name and its place in the folder.
 - Mouse wheel — zoom, centered on the pointer
 - Drag — pan
 - On a video, the bar along the bottom seeks. It hides while the pointer is idle and stays while paused
+
+A file that takes more than a second to load, for example one a cloud drive is still downloading, shows a blue spinning wheel on the side you moved toward.
 
 Started without a file, Matejko shows a picture explaining how to open a photo with Open with.
 

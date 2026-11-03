@@ -26,7 +26,8 @@ use crate::edit::{
     Rendered, SaveTarget, Saved, Slider, Tone, Warp, WorkerEvent,
 };
 use crate::gpu::{Label, LabelAlign, DIMMED_ROW};
-use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw};
+use crate::gpu::{ExtraQuad, Frame, Gpu, TransportDraw, Triangle};
+use crate::indicator::{self, EdgeCross, Loading, Side};
 use crate::info::{format_image_info, gps_coordinates, maps_url};
 use crate::playback::VideoSession;
 use crate::transport::{self, Hit};
@@ -375,6 +376,15 @@ pub struct App {
     divider_hot: bool,
     /// The panel row or button under the pointer.
     hover: Option<EditHit>,
+    /// The file being waited for after a move, for the loading wheel.
+    loading: Option<Loading>,
+    /// A wheel still fading out after a move on to another file.
+    fading: Option<Loading>,
+    /// The red cross after a step past either end of the list.
+    edge_cross: Option<EdgeCross>,
+    /// The last frame drew the wheel or the cross, so one more is needed
+    /// to clear it once neither is up.
+    indicator_drawn: bool,
     pub fatal: Option<String>,
 }
 
@@ -414,6 +424,10 @@ impl App {
             cursor_icon: CursorIcon::Default,
             divider_hot: false,
             hover: None,
+            loading: None,
+            fading: None,
+            edge_cross: None,
+            indicator_drawn: false,
             fatal: None,
         }
     }
@@ -656,33 +670,106 @@ impl App {
 
     fn shift(&mut self, delta: isize) {
         if !self.catalog.move_by(delta) {
+            self.show_edge_cross(Side::of(delta));
             return;
         }
-        self.after_navigate();
+        self.after_navigate(Side::of(delta));
     }
 
     fn shift_clamped(&mut self, delta: isize) {
         if !self.catalog.move_clamped(delta) {
+            self.show_edge_cross(Side::of(delta));
             return;
         }
-        self.after_navigate();
+        self.after_navigate(Side::of(delta));
     }
 
     fn jump_first(&mut self) {
         if !self.catalog.go_to_first() {
             return;
         }
-        self.after_navigate();
+        self.after_navigate(Side::Left);
     }
 
     fn jump_last(&mut self) {
         if !self.catalog.go_to_last() {
             return;
         }
-        self.after_navigate();
+        self.after_navigate(Side::Right);
     }
 
-    fn after_navigate(&mut self) {
+    fn show_edge_cross(&mut self, side: Side) {
+        self.edge_cross = Some(EdgeCross::trigger(self.edge_cross, Instant::now(), side));
+        self.request_redraw();
+    }
+
+    /// Starts the wait for the loading wheel. It fades out as soon as the
+    /// new file is on screen or has failed.
+    fn start_loading(&mut self, side: Side) {
+        let now = Instant::now();
+        if let Some(mut old) = self.loading.take() {
+            old.finish(now);
+            if !old.gone(now) {
+                self.fading = Some(old);
+            }
+        }
+        self.loading = Some(Loading::new(now, side));
+    }
+
+    /// Fades the wheel out once its file is shown, and forgets wheels that
+    /// have faded.
+    fn settle_loading(&mut self, now: Instant) {
+        let pending = self.loading_pending();
+        if let Some(loading) = &mut self.loading {
+            if !pending && !loading.is_finished() {
+                loading.finish(now);
+            }
+            if loading.gone(now) {
+                self.loading = None;
+            }
+        }
+        if self.fading.is_some_and(|fading| fading.gone(now)) {
+            self.fading = None;
+        }
+    }
+
+    /// The current file is still being decoded or opened.
+    fn loading_pending(&self) -> bool {
+        !self.catalog.is_empty()
+            && self.editing.is_none()
+            && self.decode_error.is_none()
+            && self.displayed.as_ref() != Some(&self.catalog.current_path())
+    }
+
+    /// The wheel and the cross for this frame.
+    fn indicator_shapes(&self, now: Instant) -> Vec<Triangle> {
+        let mut shapes = Vec::new();
+        let scale = self.scale_factor();
+        let (width, height) = (self.window_size.x, self.window_size.y);
+        let cross = self
+            .edge_cross
+            .map(|cross| (cross.side, cross.alpha(now)))
+            .filter(|(_, alpha)| *alpha > 0.0);
+        for loading in self.fading.iter().chain(&self.loading) {
+            let mut alpha = loading.alpha(now);
+            // A cross on the same side takes the wheel's place while it is up.
+            if let Some((side, cross_alpha)) = cross {
+                if side == loading.side {
+                    alpha *= 1.0 - cross_alpha;
+                }
+            }
+            let center = indicator::anchor(loading.side, width, height, scale);
+            indicator::wheel(center, scale, loading.angle(now), alpha, &mut shapes);
+        }
+        if let Some((side, alpha)) = cross {
+            let center = indicator::anchor(side, width, height, scale);
+            indicator::cross(center, scale, alpha, &mut shapes);
+        }
+        shapes
+    }
+
+    fn after_navigate(&mut self, side: Side) {
+        self.start_loading(side);
         self.decode_error = None;
         self.refresh_title();
         self.sync_images();
@@ -691,6 +778,7 @@ impl App {
 
     fn delete_current(&mut self, event_loop: &ActiveEventLoop) {
         let path = self.catalog.current_path();
+        let old_index = self.catalog.index();
         // Close the player first so the file is not locked.
         let was_video = self.video.is_some();
         self.stop_video();
@@ -705,6 +793,11 @@ impl App {
                 }
                 self.prompt = None;
                 self.decode_error = None;
+                self.start_loading(if self.catalog.index() < old_index {
+                    Side::Left
+                } else {
+                    Side::Right
+                });
                 self.refresh_title();
                 self.sync_images();
                 self.request_redraw();
@@ -798,6 +891,7 @@ impl App {
                 }
                 self.prompt = None;
                 self.decode_error = None;
+                self.start_loading(Side::Right);
             }
             Refresh::KeptCurrent => {}
         }
@@ -2033,6 +2127,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.decoder = Some(Decoder::spawn(self.proxy.clone(), max_edge));
         self._watcher = watch_folder(self.catalog.dir(), self.proxy.clone());
         self.window = Some(window);
+        self.start_loading(Side::Center);
         self.sync_images();
         self.request_redraw();
     }
@@ -2072,7 +2167,24 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
+        self.settle_loading(now);
+        if self.edge_cross.is_some_and(|cross| cross.done(now)) {
+            self.edge_cross = None;
+        }
+        let animating = self.edge_cross.is_some()
+            || self.fading.is_some()
+            || self.loading.is_some_and(|loading| now >= loading.shows_at());
+        if animating || self.indicator_drawn {
+            // Each frame asks for the next one; Fifo present paces them.
+            self.request_redraw();
+        }
+
         let mut wake_at = self.folder_dirty_until;
+        if let Some(at) = self.loading.map(|loading| loading.shows_at()) {
+            if at > now {
+                wake_at = Some(wake_at.map_or(at, |existing| existing.min(at)));
+            }
+        }
         if let Some(at) = self.editing.as_ref().and_then(|editing| editing.wheel_settle) {
             wake_at = Some(wake_at.map_or(at, |existing| existing.min(at)));
         }
@@ -2345,6 +2457,10 @@ impl ApplicationHandler<UserEvent> for App {
                 });
                 let transport = self.transport_draw(label.as_deref());
                 let quads = self.edit_quads();
+                let now = Instant::now();
+                self.settle_loading(now);
+                let shapes = self.indicator_shapes(now);
+                self.indicator_drawn = !shapes.is_empty();
                 let panel = self.edit_panel();
                 let bright = self
                     .highlighted_slider()
@@ -2386,6 +2502,7 @@ impl ApplicationHandler<UserEvent> for App {
                     transport: if self.editing.is_some() { None } else { transport },
                     scale_factor,
                     extra: &quads,
+                    shapes: &shapes,
                     labels: &labels,
                 };
                 let Some(gpu) = &mut self.gpu else {

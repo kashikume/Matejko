@@ -69,6 +69,12 @@ pub struct ExtraQuad {
     pub color: [f32; 4],
 }
 
+/// A flat triangle in physical pixels, with a color per corner.
+pub struct Triangle {
+    pub points: [[f32; 2]; 3],
+    pub colors: [[f32; 4]; 3],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LabelAlign {
     #[default]
@@ -110,6 +116,8 @@ pub struct Frame<'a> {
     pub transport: Option<TransportDraw<'a>>,
     pub scale_factor: f32,
     pub extra: &'a [ExtraQuad],
+    /// Drawn over everything but text: the loading wheel and the end cross.
+    pub shapes: &'a [Triangle],
     pub labels: &'a [Label<'a>],
 }
 
@@ -482,10 +490,19 @@ impl Gpu {
                 false,
             );
         }
-        let chrome_count = vertices.len() as u32 - chrome_start;
+        for shape in frame.shapes {
+            for (point, color) in shape.points.iter().zip(shape.colors) {
+                vertices.push(Vertex {
+                    pos: ndc(point[0], point[1], width, height),
+                    uv: [0.5, 0.5],
+                    color,
+                });
+            }
+        }
         if vertices.len() > 8192 {
             vertices.truncate(8192 / 6 * 6);
         }
+        let chrome_count = (vertices.len() as u32).saturating_sub(chrome_start);
         if !vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));

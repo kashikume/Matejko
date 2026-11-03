@@ -5,6 +5,7 @@ mod catalog;
 mod decode;
 mod edit;
 mod gpu;
+mod indicator;
 mod info;
 mod playback;
 mod transport;
