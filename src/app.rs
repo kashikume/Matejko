@@ -2075,6 +2075,75 @@ impl App {
         })
     }
 
+    /// Draws the current frame.
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let text = self.overlay_text();
+        let scale_factor = self.scale_factor();
+        let (image_width, image_height) = self
+            .image_size()
+            .map(|size| (size.x, size.y))
+            .unwrap_or((0.0, 0.0));
+        let label = self.video.as_ref().map(|video| {
+            let (position, duration) = video.timeline();
+            transport::format_clock_range(position, duration)
+        });
+        let transport = self.transport_draw(label.as_deref());
+        let quads = self.edit_quads();
+        let now = Instant::now();
+        self.settle_loading(now);
+        let shapes = self.indicator_shapes(now);
+        self.indicator_drawn = !shapes.is_empty();
+        let panel = self.edit_panel();
+        let bright = self
+            .highlighted_slider()
+            .map(EditHit::Slider)
+            .or(self.hover);
+        let labels: Vec<Label> = panel
+            .iter()
+            .flat_map(|panel| &panel.texts)
+            .map(|text| Label {
+                text: &text.text,
+                x0: text.x0,
+                x1: text.x1,
+                top: text.top,
+                color: match text.tone {
+                    Tone::Normal if text.row.is_some() && text.row == bright => {
+                        [255, 255, 255]
+                    }
+                    Tone::Normal => [212, 212, 212],
+                    Tone::Heading => [128, 140, 158],
+                    Tone::Disabled => [100, 100, 100],
+                    Tone::Notice => [240, 208, 140],
+                },
+                align: match text.align {
+                    Align::Left => LabelAlign::Left,
+                    Align::Center => LabelAlign::Center,
+                    Align::Right => LabelAlign::Right,
+                },
+                wrap: text.tone == Tone::Notice,
+            })
+            .collect();
+        let frame = Frame {
+            image_width,
+            image_height,
+            scale: self.view.scale,
+            pan_x: self.view.pan.x,
+            pan_y: self.view.pan.y,
+            dim: self.prompt.is_some() && self.editing.is_none(),
+            text: if self.editing.is_some() { None } else { text.as_deref() },
+            transport: if self.editing.is_some() { None } else { transport },
+            scale_factor,
+            extra: &quads,
+            shapes: &shapes,
+            labels: &labels,
+        };
+        let Some(gpu) = &mut self.gpu else {
+            return;
+        };
+        if let Err(err) = gpu.draw(frame) {
+            self.fail(event_loop, err);
+        }
+    }
     fn resize_to(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -2104,7 +2173,10 @@ impl ApplicationHandler<UserEvent> for App {
             .with_position(position)
             .with_resizable(true)
             .with_window_icon(icon.clone())
-            .with_taskbar_icon(icon);
+            .with_taskbar_icon(icon)
+            // Shown after the first black frame, so the window never flashes
+            // white before the GPU has drawn into it.
+            .with_visible(false);
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -2129,6 +2201,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.start_loading(Side::Center);
         self.sync_images();
+        self.redraw(event_loop);
+        if let Some(window) = &self.window {
+            window.set_visible(true);
+        }
         self.request_redraw();
     }
 
@@ -2444,74 +2520,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor = next;
                 self.cursor_valid = true;
             }
-            WindowEvent::RedrawRequested => {
-                let text = self.overlay_text();
-                let scale_factor = self.scale_factor();
-                let (image_width, image_height) = self
-                    .image_size()
-                    .map(|size| (size.x, size.y))
-                    .unwrap_or((0.0, 0.0));
-                let label = self.video.as_ref().map(|video| {
-                    let (position, duration) = video.timeline();
-                    transport::format_clock_range(position, duration)
-                });
-                let transport = self.transport_draw(label.as_deref());
-                let quads = self.edit_quads();
-                let now = Instant::now();
-                self.settle_loading(now);
-                let shapes = self.indicator_shapes(now);
-                self.indicator_drawn = !shapes.is_empty();
-                let panel = self.edit_panel();
-                let bright = self
-                    .highlighted_slider()
-                    .map(EditHit::Slider)
-                    .or(self.hover);
-                let labels: Vec<Label> = panel
-                    .iter()
-                    .flat_map(|panel| &panel.texts)
-                    .map(|text| Label {
-                        text: &text.text,
-                        x0: text.x0,
-                        x1: text.x1,
-                        top: text.top,
-                        color: match text.tone {
-                            Tone::Normal if text.row.is_some() && text.row == bright => {
-                                [255, 255, 255]
-                            }
-                            Tone::Normal => [212, 212, 212],
-                            Tone::Heading => [128, 140, 158],
-                            Tone::Disabled => [100, 100, 100],
-                            Tone::Notice => [240, 208, 140],
-                        },
-                        align: match text.align {
-                            Align::Left => LabelAlign::Left,
-                            Align::Center => LabelAlign::Center,
-                            Align::Right => LabelAlign::Right,
-                        },
-                        wrap: text.tone == Tone::Notice,
-                    })
-                    .collect();
-                let frame = Frame {
-                    image_width,
-                    image_height,
-                    scale: self.view.scale,
-                    pan_x: self.view.pan.x,
-                    pan_y: self.view.pan.y,
-                    dim: self.prompt.is_some() && self.editing.is_none(),
-                    text: if self.editing.is_some() { None } else { text.as_deref() },
-                    transport: if self.editing.is_some() { None } else { transport },
-                    scale_factor,
-                    extra: &quads,
-                    shapes: &shapes,
-                    labels: &labels,
-                };
-                let Some(gpu) = &mut self.gpu else {
-                    return;
-                };
-                if let Err(err) = gpu.draw(frame) {
-                    self.fail(event_loop, err);
-                }
-            }
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
     }
