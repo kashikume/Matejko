@@ -876,6 +876,14 @@ impl App {
         }
         self.sync_playback();
         let relevant = self.relevant_paths();
+        // Files passed on the way here are no longer wanted. Without this,
+        // holding an arrow key queues a decode for every file it passes,
+        // and the new neighbours wait behind all of them.
+        if let Some(decoder) = &self.decoder {
+            for path in decoder.retain(&relevant) {
+                self.in_flight.remove(&path);
+            }
+        }
         if !is_video(&relevant[0]) {
             self.request_decode(relevant[0].clone(), true);
         }

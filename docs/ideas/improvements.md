@@ -1,12 +1,12 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that caches the Info and Help text.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that drops stale decodes from the queue.
 
 ## Bugs
 
 ### 1. Pressing E can be lost: the decoder thread misses its wake-up
 
-[decode.rs:89](../../src/decode.rs#L89)
+[decode.rs:104](../../src/decode.rs#L104)
 
 `pop()` checks `edit` while holding the `queue` lock and then waits on `queue`. `request_edit` only takes the `edit` lock before calling `notify_one`. If E lands between that check and `wait()`, the wake-up is lost and the baseline doesn't load until some other decode arrives. The window is small but real.
 
@@ -14,7 +14,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 ### 2. A file that changes while it is being decoded keeps the old pixels
 
-[app.rs:945](../../src/app.rs#L945), [app.rs:889](../../src/app.rs#L889)
+[app.rs:953](../../src/app.rs#L953), [app.rs:897](../../src/app.rs#L897)
 
 `invalidate_stale_cache` only checks entries already in `cache`, not paths still decoding. When a file is still being written (copying from a camera, or another app saving), this happens:
 
@@ -29,13 +29,13 @@ Fix: have the decoder read the stamp before decoding and return it with the resu
 
 ### 3. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
-[app.rs:2621](../../src/app.rs#L2621)
+[app.rs:2629](../../src/app.rs#L2629)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
 ### 4. A brief folder read error closes the app
 
-[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:920](../../src/app.rs#L920)
+[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:928](../../src/app.rs#L928)
 
 If `scan_dir` fails (network share hiccup, folder briefly locked), the list is cleared, `Refresh::Empty` comes back, and the viewer exits. Leaving edit mode always rescans, so a failure at that moment closes the app too.
 
@@ -43,26 +43,18 @@ Fix: a failed scan should keep the current list.
 
 ### 5. A failed edit load shows its error on the wrong file
 
-[app.rs:2379](../../src/app.rs#L2379)
+[app.rs:2387](../../src/app.rs#L2387)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
 ### 6. Minor bugs
 
-- [decode.rs:170](../../src/decode.rs#L170): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
+- [decode.rs:190](../../src/decode.rs#L190): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:502](../../src/gpu.rs#L502)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
 
 ## Optimizations, roughly by payoff
 
-### 1. Remove stale decodes from the queue
-
-[decode.rs:70](../../src/decode.rs#L70)
-
-Nothing is ever removed from the queue. Holding → through 100 photos queues about 100 neighbour decodes (100–300 ms each for 24 MP). The CPU stays busy for seconds afterwards, and the real neighbour prefetch sits behind all of them.
-
-Fix: in `sync_images`, drop queued paths that are no longer current or neighbours.
-
-### 2. Display photos with mipmaps
+### 1. Display photos with mipmaps
 
 [gpu.rs:369](../../src/gpu.rs#L369)
 
@@ -70,7 +62,7 @@ The texture has one mip level and the sampler is plain linear. A 24 MP photo fit
 
 Fix: generate a mip chain, either on the decode thread or with GPU blit passes, and set `mipmap_filter: Linear`.
 
-### 3. Reduce edit pipeline memory
+### 2. Reduce edit pipeline memory
 
 For a 24 MP photo the baseline in f32 is about 288 MB.
 
@@ -81,7 +73,7 @@ Peak use during a full render goes past 1 GB, and several GB for 50–60 MP file
 
 Fix: borrow the baseline instead of copying it (`Cow`), let `clarity` take `Image` by value and change it in place, and merge the pixel-by-pixel stages (white balance, exposure, blackpoint) into one pass.
 
-### 4. Cache `Warp::usable()`
+### 3. Cache `Warp::usable()`
 
 [pipeline.rs:1364](../../src/edit/pipeline.rs#L1364)
 
@@ -89,7 +81,7 @@ With keystone or distortion set, one call is 40 search steps × 32 bisections ×
 
 Fix: cache it on the warp's inputs.
 
-### 5. Make the video frame copy cheaper
+### 4. Make the video frame copy cheaper
 
 [playback.rs:492](../../src/playback.rs#L492)
 
@@ -97,7 +89,7 @@ Each frame does a synchronous `Map` right after `CopyResource` (a GPU stall), al
 
 Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, reuse the buffer, and double-buffer the staging texture.
 
-### 6. Small ones
+### 5. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move.
 - `load_session` reads the whole photo even when an adj file or baseline means it isn't used ([files.rs:243](../../src/edit/files.rs#L243)).

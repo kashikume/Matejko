@@ -86,6 +86,21 @@ impl Jobs {
         }
     }
 
+    /// Drops every waiting decode not in `keep`, and returns the paths it
+    /// dropped. The decode already running finishes.
+    fn retain(&self, keep: &[PathBuf]) -> Vec<PathBuf> {
+        let mut queue = self.queue.lock().expect("decode queue");
+        let mut dropped = Vec::new();
+        queue.retain(|queued| {
+            let kept = keep.contains(queued);
+            if !kept {
+                dropped.push(queued.clone());
+            }
+            kept
+        });
+        dropped
+    }
+
     fn request_edit(&self, path: PathBuf) {
         *self.edit.lock().expect("edit queue") = Some(path);
         self.ready.notify_one();
@@ -155,6 +170,11 @@ impl Decoder {
 
     pub fn request_edit(&self, path: PathBuf) {
         self.jobs.request_edit(path);
+    }
+
+    /// See `Jobs::retain`.
+    pub fn retain(&self, keep: &[PathBuf]) -> Vec<PathBuf> {
+        self.jobs.retain(keep)
     }
 }
 
@@ -247,6 +267,18 @@ mod tests {
         out.extend_from_slice(&payload);
         out.extend_from_slice(&jpeg[2..]);
         out
+    }
+
+    #[test]
+    fn retain_drops_the_decodes_that_are_no_longer_wanted() {
+        let jobs = Jobs::new();
+        for name in ["a.jpg", "b.jpg", "c.jpg", "d.jpg"] {
+            jobs.enqueue(PathBuf::from(name), false);
+        }
+        let dropped = jobs.retain(&[PathBuf::from("c.jpg"), PathBuf::from("x.jpg")]);
+        assert_eq!(dropped, ["a.jpg", "b.jpg", "d.jpg"].map(PathBuf::from));
+        assert!(matches!(jobs.pop(), Job::View(path) if path == Path::new("c.jpg")));
+        assert!(jobs.queue.lock().unwrap().is_empty());
     }
 
     #[test]
