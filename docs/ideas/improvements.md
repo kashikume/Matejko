@@ -14,15 +14,7 @@ Fix: a failed scan should keep the current list.
 
 ## Optimizations, roughly by payoff
 
-### 1. Display photos with mipmaps
-
-[gpu.rs:383](../../src/gpu.rs#L383)
-
-The texture has one mip level and the sampler is plain linear. A 24 MP photo fit into a 1080p window is minified 4–6×, which gives visible aliasing and moiré.
-
-Fix: generate a mip chain, either on the decode thread or with GPU blit passes, and set `mipmap_filter: Linear`.
-
-### 2. Reduce edit pipeline memory and passes
+### 1. Reduce edit pipeline memory and passes
 
 [pipeline.rs:316](../../src/edit/pipeline.rs#L316)
 
@@ -36,7 +28,7 @@ Peak use during a full render goes past 1 GB, and several GB for 50–60 MP file
 
 Fix: borrow the baseline instead of copying it (`Cow`), let `clarity` take `Image` by value and change it in place, and merge the pixel-by-pixel stages into one pass before and one after the shadow/highlight step.
 
-### 3. Cache `Warp::usable()`
+### 2. Cache `Warp::usable()`
 
 [pipeline.rs:1364](../../src/edit/pipeline.rs#L1364)
 
@@ -44,7 +36,7 @@ With keystone or distortion set, one call is 40 search steps × 32 bisections ×
 
 Fix: cache it on the warp's inputs.
 
-### 4. Encode to 8-bit without `powf`
+### 3. Encode to 8-bit without `powf`
 
 [image.rs:126](../../src/edit/image.rs#L126)
 
@@ -52,13 +44,13 @@ Fix: cache it on the warp's inputs.
 
 Fix: a table over linear values (for example 4096 entries with interpolation), which leaves room for the dither noise. `code_of` already does this for the histogram.
 
-### 5. Don't decode the JPEG a second time on E
+### 4. Don't decode the JPEG a second time on E
 
 [decode.rs:214](../../src/decode.rs#L214), [files.rs:431](../../src/edit/files.rs#L431)
 
 When there is no `.matejko` baseline yet, the baseline is the open file, which the viewer has already decoded to RGBA. Handing that to `Image::from_srgb_rgba` saves a full decode, several hundred milliseconds for a large photo.
 
-### 6. Small ones
+### 5. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move, allocating every label string each time.
 - `LabelShape` copies each label's text every frame before comparing it ([gpu.rs:765](../../src/gpu.rs#L765)). Compare first, copy only on a change.

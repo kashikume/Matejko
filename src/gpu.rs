@@ -53,6 +53,193 @@ fn fs_opaque(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Draws one mip level from the level above it. The target is covered by a
+/// single triangle, and each target pixel's bilinear sample lands between
+/// four source pixels, so it is their average. The textures are sRGB, so the
+/// sampler decodes and the target encodes: the average is in linear light.
+const MIP_SHADER: &str = r#"
+struct MipOutput {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_mip(@builtin(vertex_index) index: u32) -> MipOutput {
+    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: MipOutput;
+    out.clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+@fragment
+fn fs_mip(in: MipOutput) -> @location(0) vec4<f32> {
+    return textureSampleLevel(source, source_sampler, in.uv, 0.0);
+}
+"#;
+
+/// Mip levels down to one pixel on the long side.
+fn mip_levels(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+/// A texture and a filtering sampler for the fragment shader: the layout
+/// the picture, the flat shapes, and the mip blits all share.
+fn image_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("image"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Fills a picture texture's smaller mip levels from its full-size one.
+struct Mips {
+    layout: wgpu::BindGroupLayout,
+    /// One blit per picture format: photos are RGBA, video frames BGRA.
+    rgba: wgpu::RenderPipeline,
+    bgra: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+}
+
+impl Mips {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mip"),
+            source: wgpu::ShaderSource::Wgsl(MIP_SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mip"),
+            bind_group_layouts: &[Some(layout)],
+            immediate_size: 0,
+        });
+        let pipeline = |target: wgpu::TextureFormat| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mip"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_mip"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_mip"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        Self {
+            layout: layout.clone(),
+            rgba: pipeline(wgpu::TextureFormat::Rgba8UnormSrgb),
+            bgra: pipeline(wgpu::TextureFormat::Bgra8UnormSrgb),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("mip"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Draws mip levels 1 and down from level 0, each from the one above.
+    /// An upload queued before this lands first: queued writes go ahead of
+    /// a submit.
+    fn generate(&self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) {
+        let levels = texture.mip_level_count();
+        if levels < 2 {
+            return;
+        }
+        let pipeline = match texture.format() {
+            wgpu::TextureFormat::Bgra8UnormSrgb => &self.bgra,
+            _ => &self.rgba,
+        };
+        let level_view = |level: u32| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("mip"),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mips") });
+        let mut source = level_view(0);
+        for level in 1..levels {
+            let target = level_view(level);
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mip"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("mip"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            source = target;
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
@@ -139,6 +326,7 @@ pub struct Gpu {
     opaque_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
+    mips: Mips,
     vertices: wgpu::Buffer,
     white_bind: wgpu::BindGroup,
     image: Option<ImageTexture>,
@@ -232,27 +420,7 @@ impl Gpu {
             label: Some("image"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("image"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        let bind_group_layout = image_bind_group_layout(&device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("image"),
             bind_group_layouts: &[Some(&bind_group_layout)],
@@ -295,10 +463,14 @@ impl Gpu {
         };
         let pipeline = make_pipeline("fs_main");
         let opaque_pipeline = make_pipeline("fs_opaque");
+        let mips = Mips::new(&device, &bind_group_layout);
+        // Between mip levels too, so a picture shrunk to fit the window
+        // does not shimmer or show moiré.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("image"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
@@ -334,6 +506,7 @@ impl Gpu {
             opaque_pipeline,
             sampler,
             bind_group_layout,
+            mips,
             vertices,
             white_bind,
             image: None,
@@ -375,17 +548,21 @@ impl Gpu {
                 height: image.height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count: mip_levels(image.width, image.height),
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: match image.order {
                 PixelOrder::Rgba => wgpu::TextureFormat::Rgba8UnormSrgb,
                 PixelOrder::Bgrx => wgpu::TextureFormat::Bgra8UnormSrgb,
             },
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // Each smaller level is drawn from the one above it.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         upload_rgba(&self.queue, &texture, image);
+        self.mips.generate(&self.device, &self.queue, &texture);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("photo"),
@@ -420,6 +597,7 @@ impl Gpu {
                 && existing.order == image.order
             {
                 upload_rgba(&self.queue, &existing.texture, image);
+                self.mips.generate(&self.device, &self.queue, &existing.texture);
                 return Ok(());
             }
         }
@@ -1148,4 +1326,111 @@ fn ndc(x: f32, y: f32, width: f32, height: f32) -> [f32; 2] {
         return [0.0, 0.0];
     }
     [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mip_levels_reach_one_pixel() {
+        assert_eq!(mip_levels(1, 1), 1);
+        assert_eq!(mip_levels(2, 2), 2);
+        assert_eq!(mip_levels(1920, 1080), 11);
+        assert_eq!(mip_levels(6000, 4000), 13);
+    }
+
+    /// A GPU device with no window, or `None` on a machine without one.
+    fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    }
+
+    /// The one pixel of level 1 of a 2 × 2 picture.
+    fn second_level(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mips: &Mips,
+        image: &DecodedImage,
+    ) -> [u8; 4] {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: extent(image),
+            mip_level_count: mip_levels(image.width, image.height),
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: match image.order {
+                PixelOrder::Rgba => wgpu::TextureFormat::Rgba8UnormSrgb,
+                PixelOrder::Bgrx => wgpu::TextureFormat::Bgra8UnormSrgb,
+            },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        upload_rgba(queue, &texture, image);
+        mips.generate(device, queue, &texture);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 1,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        readback.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let bytes = readback.get_mapped_range(..).unwrap();
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
+    }
+
+    #[test]
+    fn a_smaller_level_averages_in_linear_light() {
+        let Some((device, queue)) = headless() else {
+            eprintln!("No GPU adapter; skipped.");
+            return;
+        };
+        let mips = Mips::new(&device, &image_bind_group_layout(&device));
+        // Black and white in a checker. Their average is half the light,
+        // which sRGB writes as 188, not the 128 a plain byte average gives.
+        let (k, w) = ([0, 0, 0, 255], [255, 255, 255, 255]);
+        let checker = [k, w, w, k].concat();
+        for order in [PixelOrder::Rgba, PixelOrder::Bgrx] {
+            let image = DecodedImage {
+                width: 2,
+                height: 2,
+                pixels: checker.clone(),
+                order,
+            };
+            let pixel = second_level(&device, &queue, &mips, &image);
+            for channel in &pixel[..3] {
+                assert!((186..=190).contains(channel), "{order:?}: {pixel:?}");
+            }
+        }
+    }
 }
