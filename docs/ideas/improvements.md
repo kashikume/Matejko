@@ -1,12 +1,12 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Nothing here is fixed yet. The project was not built and the tests were not run for this review. Line numbers refer to the code as it was then.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against commit `115fc3c`.
 
 ## Bugs
 
 ### 1. Pressing E can be lost: the decoder thread misses its wake-up
 
-[decode.rs:243](../../src/decode.rs#L243)
+[decode.rs:89](../../src/decode.rs#L89)
 
 `pop()` checks `edit` while holding the `queue` lock and then waits on `queue`. `request_edit` only takes the `edit` lock before calling `notify_one`. If E lands between that check and `wait()`, the wake-up is lost and the baseline doesn't load until some other decode arrives. The window is small but real.
 
@@ -14,7 +14,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 ### 2. A file that changes while it is being decoded keeps the old pixels
 
-[app.rs:904](../../src/app.rs#L904), [app.rs:846](../../src/app.rs#L846)
+[app.rs:922](../../src/app.rs#L922), [app.rs:868](../../src/app.rs#L868)
 
 `invalidate_stale_cache` only checks entries already in `cache`, not paths still decoding. When a file is still being written (copying from a camera, or another app saving), this happens:
 
@@ -29,7 +29,7 @@ Fix: have the decoder read the stamp before decoding and return it with the resu
 
 ### 3. Saved JPEGs keep the old embedded thumbnail
 
-[files.rs:497](../../src/edit/files.rs#L497)
+[files.rs:523](../../src/edit/files.rs#L523)
 
 `patch_exif` copies the baseline's APP1 block as it is, including the IFD1 thumbnail. Explorer and many viewers show that thumbnail, so they show the unedited, uncropped, unrotated photo.
 
@@ -37,42 +37,42 @@ Fix: drop IFD1 (set IFD0's next-IFD offset to 0) or write a new thumbnail.
 
 ### 4. A long EXIF block can corrupt the saved file
 
-[files.rs:701](../../src/edit/files.rs#L701)
+[files.rs:727](../../src/edit/files.rs#L727)
 
 `(app1.len() - 2) as u16` wraps silently. Cameras with large maker notes have APP1 blocks close to 64 KB, and appending the Software text pushes them over, which makes the JPEG invalid.
 
-Fix: skip the Software change when it doesn't fit, or drop the thumbnail first to make room. Similarly, `image.width as u16` in [files.rs:394](../../src/edit/files.rs#L394) should use `u16::try_from` and return an error.
+Fix: skip the Software change when it doesn't fit, or drop the thumbnail first to make room. Similarly, `image.width as u16` in [files.rs:420](../../src/edit/files.rs#L420) should use `u16::try_from` and return an error.
 
 ### 5. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
-[app.rs:2550](../../src/app.rs#L2550)
+[app.rs:2570](../../src/app.rs#L2570)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
 ### 6. A brief folder read error closes the app
 
-[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:879](../../src/app.rs#L879)
+[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:897](../../src/app.rs#L897)
 
-If `scan_dir` fails (network share hiccup, folder briefly locked), the list is cleared, `Refresh::Empty` comes back, and the viewer exits.
+If `scan_dir` fails (network share hiccup, folder briefly locked), the list is cleared, `Refresh::Empty` comes back, and the viewer exits. Leaving edit mode always rescans, so a failure at that moment closes the app too.
 
 Fix: a failed scan should keep the current list.
 
 ### 7. A failed edit load shows its error on the wrong file
 
-[app.rs:2311](../../src/app.rs#L2311)
+[app.rs:2328](../../src/app.rs#L2328)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
 ### 8. Minor bugs
 
-- [decode.rs:324](../../src/decode.rs#L324): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
+- [decode.rs:170](../../src/decode.rs#L170): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:502](../../src/gpu.rs#L502)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
 
 ## Optimizations, roughly by payoff
 
 ### 1. Remove stale decodes from the queue
 
-[decode.rs:224](../../src/decode.rs#L224)
+[decode.rs:70](../../src/decode.rs#L70)
 
 Nothing is ever removed from the queue. Holding → through 100 photos queues about 100 neighbour decodes (100–300 ms each for 24 MP). The CPU stays busy for seconds afterwards, and the real neighbour prefetch sits behind all of them.
 
@@ -88,10 +88,10 @@ Fix: generate a mip chain, either on the decode thread or with GPU blit passes, 
 
 ### 3. Use lookup tables instead of `powf` in edit-mode colour conversion
 
-[image.rs:219](../../src/edit/image.rs#L219)
+[image.rs:23](../../src/edit/image.rs#L23)
 
 - `from_srgb_rgba` runs `powf` three times per pixel on one thread: about 72M calls for 24 MP, and the main cost of opening edit mode. A 256-entry table, run in parallel, makes it nearly free.
-- `histogram_region` ([image.rs:333](../../src/edit/image.rs#L333)) calls `quantize` (another `powf`) per channel over the whole full-size render. Build the histogram from the RGBA bytes already produced, or from the drag-size image.
+- `histogram_region` ([image.rs:137](../../src/edit/image.rs#L137)) calls `quantize` (another `powf`) per channel over the whole full-size render. Build the histogram from the RGBA bytes already produced, or from the drag-size image.
 
 ### 4. Reduce edit pipeline memory
 
@@ -122,7 +122,7 @@ Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, r
 
 ### 7. Build the Info and Help text once
 
-[app.rs:1877](../../src/app.rs#L1877)
+[app.rs:1894](../../src/app.rs#L1894)
 
 `format_image_info` reads and parses EXIF twice per call (`read_exif`, then `gps_coordinates`), and `help_text` parses it once. Both run on every redraw, including every pan step and every frame of the loading wheel.
 
