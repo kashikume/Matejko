@@ -277,6 +277,21 @@ enum Prompt {
     Failed(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    Help,
+    Info,
+}
+
+/// What a help or info text was built from. Another key builds it again.
+#[derive(PartialEq, Eq)]
+struct OverlayKey {
+    kind: OverlayKind,
+    path: PathBuf,
+    pixels: Option<(u32, u32)>,
+    duration: Option<Duration>,
+}
+
 /// Two presses on the same slider within this reset it.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// In edit mode the wheel zooms out to this fraction of the fitted size.
@@ -363,6 +378,8 @@ pub struct App {
     displayed: Option<PathBuf>,
     shown_size: Option<Vec2>,
     prompt: Option<Prompt>,
+    /// The help or info text last drawn, and what it was built from.
+    overlay_cache: Option<(OverlayKey, String)>,
     decode_error: Option<String>,
     cursor_visibility: CursorVisibility,
     cursor_drawn: bool,
@@ -417,6 +434,7 @@ impl App {
             displayed: None,
             shown_size: None,
             prompt: None,
+            overlay_cache: None,
             decode_error: None,
             cursor_visibility: CursorVisibility::new(),
             cursor_drawn: true,
@@ -527,11 +545,14 @@ impl App {
                 self.request_redraw();
             }
             Action::ShowHelp => {
+                // Opening reads the file afresh.
+                self.overlay_cache = None;
                 self.pause_video_for_overlay();
                 self.prompt = Some(Prompt::Help);
                 self.request_redraw();
             }
             Action::ShowInfo => {
+                self.overlay_cache = None;
                 self.pause_video_for_overlay();
                 self.prompt = Some(Prompt::Info);
                 self.request_redraw();
@@ -888,6 +909,8 @@ impl App {
         if self.editing.is_some() {
             return;
         }
+        // The file under an open overlay may have been rewritten.
+        self.overlay_cache = None;
         let old_current = if self.catalog.is_empty() {
             None
         } else {
@@ -1891,20 +1914,48 @@ impl App {
             .join("\n")
     }
 
-    fn overlay_text(&self) -> Option<String> {
+    /// The help or info text, read from the file only when what it shows
+    /// has changed. Both read the EXIF, and a redraw comes with every pan
+    /// step and every frame of the loading wheel.
+    fn cached_overlay(&mut self, key: OverlayKey) -> String {
+        if let Some((cached, text)) = &self.overlay_cache {
+            if *cached == key {
+                return text.clone();
+            }
+        }
+        let text = match key.kind {
+            OverlayKind::Help => self.help_text(),
+            OverlayKind::Info => format_image_info(&key.path, key.pixels, key.duration),
+        };
+        self.overlay_cache = Some((key, text.clone()));
+        text
+    }
+
+    fn overlay_text(&mut self) -> Option<String> {
         if self.catalog.is_empty() {
             return None;
         }
         let name = self.catalog.file_name();
+        let path = self.catalog.current_path();
         match &self.prompt {
-            Some(Prompt::Help) => Some(self.help_text()),
+            Some(Prompt::Help) => Some(self.cached_overlay(OverlayKey {
+                kind: OverlayKind::Help,
+                path,
+                pixels: None,
+                duration: None,
+            })),
             Some(Prompt::Info) => {
-                let path = self.catalog.current_path();
+                // The size and the length can arrive after the overlay opens.
                 let pixels = self
                     .image_size()
                     .map(|size| (size.x.round() as u32, size.y.round() as u32));
                 let duration = self.video.as_ref().and_then(|video| video.duration());
-                Some(format_image_info(&path, pixels, duration))
+                Some(self.cached_overlay(OverlayKey {
+                    kind: OverlayKind::Info,
+                    path,
+                    pixels,
+                    duration,
+                }))
             }
             Some(Prompt::Delete) => Some(format!(
                 "Delete \"{name}\"?\nEnter to delete, Esc to cancel"

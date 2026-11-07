@@ -1,6 +1,6 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that dropped the EXIF thumbnail.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that caches the Info and Help text.
 
 ## Bugs
 
@@ -14,7 +14,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 ### 2. A file that changes while it is being decoded keeps the old pixels
 
-[app.rs:922](../../src/app.rs#L922), [app.rs:868](../../src/app.rs#L868)
+[app.rs:945](../../src/app.rs#L945), [app.rs:889](../../src/app.rs#L889)
 
 `invalidate_stale_cache` only checks entries already in `cache`, not paths still decoding. When a file is still being written (copying from a camera, or another app saving), this happens:
 
@@ -29,13 +29,13 @@ Fix: have the decoder read the stamp before decoding and return it with the resu
 
 ### 3. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
-[app.rs:2570](../../src/app.rs#L2570)
+[app.rs:2621](../../src/app.rs#L2621)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
 ### 4. A brief folder read error closes the app
 
-[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:897](../../src/app.rs#L897)
+[catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:920](../../src/app.rs#L920)
 
 If `scan_dir` fails (network share hiccup, folder briefly locked), the list is cleared, `Refresh::Empty` comes back, and the viewer exits. Leaving edit mode always rescans, so a failure at that moment closes the app too.
 
@@ -43,7 +43,7 @@ Fix: a failed scan should keep the current list.
 
 ### 5. A failed edit load shows its error on the wrong file
 
-[app.rs:2328](../../src/app.rs#L2328)
+[app.rs:2379](../../src/app.rs#L2379)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
@@ -97,16 +97,8 @@ Each frame does a synchronous `Map` right after `CopyResource` (a GPU stall), al
 
 Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, reuse the buffer, and double-buffer the staging texture.
 
-### 6. Build the Info and Help text once
-
-[app.rs:1894](../../src/app.rs#L1894)
-
-`format_image_info` reads and parses EXIF twice per call (`read_exif`, then `gps_coordinates`), and `help_text` parses it once. Both run on every redraw, including every pan step and every frame of the loading wheel.
-
-Fix: build the text when the overlay opens.
-
-### 7. Small ones
+### 6. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move.
-- `load_session` reads the whole photo even when an adj file or baseline means it isn't used ([files.rs:236](../../src/edit/files.rs#L236)).
+- `load_session` reads the whole photo even when an adj file or baseline means it isn't used ([files.rs:243](../../src/edit/files.rs#L243)).
 - Catalog sorting allocates two `Vec<u16>` per comparison. Precompute the wide names once.

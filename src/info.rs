@@ -75,16 +75,22 @@ pub fn format_image_info(
             }
             _ => lines.push("Duration unknown".into()),
         }
-    } else {
+    }
+    // One read of the EXIF serves the summary and the map hint.
+    let mut has_gps = false;
+    if !is_video(path) {
         match read_exif(path) {
-            Ok(exif) => append_exif(&mut lines, &exif),
+            Ok(exif) => {
+                append_exif(&mut lines, &exif);
+                has_gps = gps_from_exif(&exif).is_some();
+            }
             Err(ExifStatus::Missing) => lines.push("No EXIF data".into()),
             Err(ExifStatus::Error(err)) => lines.push(format!("EXIF unavailable. {err}")),
         }
     }
 
     lines.push(String::new());
-    if gps_coordinates(path).is_some() {
+    if has_gps {
         lines.push("M to show on Google Maps".into());
     }
     lines.push("Esc or I to close".into());
@@ -97,9 +103,12 @@ pub fn gps_coordinates(path: &Path) -> Option<(f64, f64)> {
     if is_video(path) {
         return None;
     }
-    let exif = read_exif(path).ok()?;
-    let lat = gps_degrees(&exif, Tag::GPSLatitude, Tag::GPSLatitudeRef, b'S')?;
-    let lon = gps_degrees(&exif, Tag::GPSLongitude, Tag::GPSLongitudeRef, b'W')?;
+    gps_from_exif(&read_exif(path).ok()?)
+}
+
+fn gps_from_exif(exif: &Exif) -> Option<(f64, f64)> {
+    let lat = gps_degrees(exif, Tag::GPSLatitude, Tag::GPSLatitudeRef, b'S')?;
+    let lon = gps_degrees(exif, Tag::GPSLongitude, Tag::GPSLongitudeRef, b'W')?;
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
         return None;
     }
