@@ -163,8 +163,6 @@ impl Image {
 fn finite_or_zero(v: f32) -> f32 {
     if v.is_finite() && v > 0.0 {
         v
-    } else if v.is_finite() && v == 0.0 {
-        0.0
     } else {
         0.0
     }
