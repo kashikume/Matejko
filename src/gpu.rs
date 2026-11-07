@@ -431,17 +431,19 @@ impl Gpu {
         self.set_image(image)
     }
 
-    pub fn draw(&mut self, frame: Frame<'_>) -> Result<(), String> {
+    /// `Ok(true)` when the frame reached the screen, `Ok(false)` when the
+    /// surface was not ready and another redraw has been asked for.
+    pub fn draw(&mut self, frame: Frame<'_>) -> Result<bool, String> {
         let texture = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => texture,
             CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => {
                 self.window.request_redraw();
-                return Ok(());
+                return Ok(false);
             }
             CurrentSurfaceTexture::Suboptimal(_) | CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
-                return Ok(());
+                return Ok(false);
             }
             CurrentSurfaceTexture::Lost => {
                 self.surface = self
@@ -450,7 +452,7 @@ impl Gpu {
                     .map_err(|err| format!("Couldn't recreate the drawing surface. {err}"))?;
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
-                return Ok(());
+                return Ok(false);
             }
             CurrentSurfaceTexture::Validation => {
                 return Err("The GPU rejected a frame.".into());
@@ -591,7 +593,7 @@ impl Gpu {
         self.queue.submit(std::iter::once(encoder.finish()));
         self.window.pre_present_notify();
         self.queue.present(texture);
-        Ok(())
+        Ok(true)
     }
 }
 

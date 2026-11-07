@@ -376,6 +376,9 @@ pub struct App {
     cache: HashMap<PathBuf, CacheEntry>,
     in_flight: HashSet<PathBuf>,
     displayed: Option<PathBuf>,
+    /// The current file as of the last frame that reached the screen, when
+    /// that frame showed it in full or showed why it failed.
+    presented: Option<PathBuf>,
     shown_size: Option<Vec2>,
     prompt: Option<Prompt>,
     /// The help or info text last drawn, and what it was built from.
@@ -432,6 +435,7 @@ impl App {
             cache: HashMap::new(),
             in_flight: HashSet::new(),
             displayed: None,
+            presented: None,
             shown_size: None,
             prompt: None,
             overlay_cache: None,
@@ -516,6 +520,11 @@ impl App {
     }
 
     fn on_command(&mut self, event_loop: &ActiveEventLoop, command: Command, repeat: bool) {
+        // A held navigation key moves on only once the file it reached is on
+        // screen, so every file it passes is shown. The first press always moves.
+        if repeat && !self.current_on_screen() {
+            return;
+        }
         let action = match action_for(command, self.mode(), repeat) {
             Action::AskDelete
             | Action::ShowInfo
@@ -774,6 +783,12 @@ impl App {
         if self.fading.is_some_and(|fading| fading.gone(now)) {
             self.fading = None;
         }
+    }
+
+    /// The current file has been drawn: its picture, its first video frame,
+    /// or the error that it could not be shown.
+    fn current_on_screen(&self) -> bool {
+        self.catalog.is_empty() || self.presented.as_ref() == Some(&self.catalog.current_path())
     }
 
     /// The current file is still being decoded or opened.
@@ -2221,8 +2236,15 @@ impl App {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        if let Err(err) = gpu.draw(frame) {
-            self.fail(event_loop, err);
+        match gpu.draw(frame) {
+            Ok(true) => {
+                // The current file is on screen once nothing is left to load
+                // for it: its picture, or the error that it cannot be shown.
+                self.presented = (!self.catalog.is_empty() && !self.loading_pending())
+                    .then(|| self.catalog.current_path());
+            }
+            Ok(false) => {}
+            Err(err) => self.fail(event_loop, err),
         }
     }
     fn resize_to(&mut self, size: PhysicalSize<u32>) {

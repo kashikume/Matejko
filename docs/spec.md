@@ -28,7 +28,7 @@ The process takes the file path as its parameter. It opens that file and builds 
 
 ### Browsing list
 
-The list includes JPEG, PNG, and MP4 files in that directory. Left and Right move to the previous and next file in alphabetical order. Home and End jump to the ends. Page Up and Page Down jump by 10 files. Those keys never seek inside a video.
+The list includes JPEG, PNG, and MP4 files in that directory. Left and Right move to the previous and next file in alphabetical order. Home and End jump to the ends. Page Up and Page Down jump by 10 files. Those keys never seek inside a video. A held key repeats, but each repeat waits until the file it reached is on screen, so every file passed is displayed. On screen means its picture, its first video frame, or the error that it cannot be shown. The first press always moves.
 
 ### Folder watching
 
