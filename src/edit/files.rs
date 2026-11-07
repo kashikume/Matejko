@@ -69,27 +69,7 @@ impl SessionPaths {
                 original_name: session.original_name.clone(),
             };
         }
-        let original = Path::new(&session.original_name);
-        let original_stem = original
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image".into());
-        let extension = original
-            .extension()
-            .map(|extension| format!(".{}", extension.to_string_lossy()))
-            .unwrap_or_default();
-        let mut name = session.original_name.clone();
-        for n in 2.. {
-            let candidate = matejko.join(&name);
-            let free = match fs::read(&candidate) {
-                Ok(bytes) => bytes == baseline_bytes,
-                Err(_) => !candidate.exists(),
-            };
-            if free {
-                break;
-            }
-            name = format!("{original_stem}_{n}{extension}");
-        }
+        let name = free_baseline_name(&matejko, &session.original_name, baseline_bytes);
         Self {
             open: copy.to_path_buf(),
             baseline: matejko.join(&name),
@@ -99,10 +79,50 @@ impl SessionPaths {
     }
 }
 
+/// `name` in `matejko`, or the first of `<stem>_2<ext>`, `<stem>_3<ext>`, …
+/// that is free. A file there with the same bytes counts as free: it is
+/// this baseline already. One with other bytes belongs to another photo.
+fn free_baseline_name(matejko: &Path, name: &str, baseline_bytes: &[u8]) -> String {
+    let original = Path::new(name);
+    let stem = original
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    let extension = original
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let mut name = name.to_string();
+    for n in 2.. {
+        let candidate = matejko.join(&name);
+        let free = match fs::read(&candidate) {
+            Ok(bytes) => bytes == baseline_bytes,
+            Err(_) => !candidate.exists(),
+        };
+        if free {
+            break;
+        }
+        name = format!("{stem}_{n}{extension}");
+    }
+    name
+}
+
+/// FNV-1a, 64 bits, of a file's bytes. It tells whether the photo on disk
+/// is still the one Matejko last wrote under that name.
+fn content_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ *byte as u64).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AdjFileRaw {
     version: u32,
     original: String,
+    /// `content_hash` of the JPEG this adj was saved with, in hex. Older
+    /// files have none, and their photo is taken on trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written: Option<String>,
     adjustments: AdjBody,
 }
 
@@ -145,6 +165,8 @@ struct FrameBody {
 
 pub struct AdjFile {
     pub original: String,
+    /// `content_hash` of the JPEG written with this adj, when known.
+    pub written: Option<u64>,
     pub adjustments: Adjustments,
 }
 
@@ -153,6 +175,7 @@ impl AdjFile {
         let body = AdjFileRaw {
             version: VERSION,
             original: self.original.clone(),
+            written: self.written.map(|hash| format!("{hash:016x}")),
             adjustments: AdjBody {
                 quarter_turns: self.adjustments.quarter_turns,
                 mirror_horizontal: self.adjustments.mirror_horizontal,
@@ -192,8 +215,16 @@ impl AdjFile {
         }
         let aspect = Aspect::parse(&raw.adjustments.aspect)
             .ok_or_else(|| format!("Unknown aspect {}.", raw.adjustments.aspect))?;
+        let written = raw
+            .written
+            .map(|hex| {
+                u64::from_str_radix(&hex, 16)
+                    .map_err(|_| format!("Unknown file hash {hex}."))
+            })
+            .transpose()?;
         Ok(Self {
             original: raw.original,
+            written,
             adjustments: Adjustments {
                 quarter_turns: raw.adjustments.quarter_turns % 4,
                 mirror_horizontal: raw.adjustments.mirror_horizontal,
@@ -242,8 +273,19 @@ pub struct LoadedSession {
 pub fn load_session(open: &Path) -> Result<LoadedSession, String> {
     let bytes = fs::read(open).map_err(|err| err.to_string())?;
     let mut paths = SessionPaths::for_open(open);
-    let (baseline_bytes, original_name, baseline_source) = if let Ok(adj_text) = fs::read_to_string(&paths.adj) {
-        let adj = AdjFile::parse(&adj_text)?;
+    let adj = match fs::read_to_string(&paths.adj) {
+        Ok(text) => Some(AdjFile::parse(&text)?),
+        Err(_) => None,
+    };
+    // An adj that records what it wrote, when the open file is something
+    // else, is another photo's under the same name, or the photo was
+    // changed elsewhere since. Either way the open file is a new original.
+    let stale = adj
+        .as_ref()
+        .and_then(|adj| adj.written)
+        .is_some_and(|written| written != content_hash(&bytes));
+    let adj = adj.filter(|_| !stale);
+    let (baseline_bytes, original_name, baseline_source) = if let Some(adj) = adj {
         let baseline_path = open
             .parent()
             .unwrap_or(Path::new("."))
@@ -255,6 +297,14 @@ pub fn load_session(open: &Path) -> Result<LoadedSession, String> {
         paths.baseline = baseline_path.clone();
         paths.original_name = adj.original.clone();
         (baseline_bytes, Some(adj), baseline_path)
+    } else if stale {
+        // The baseline under this name is the other photo's. This one gets
+        // a name of its own when it is first saved.
+        let matejko = paths.baseline.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let name = free_baseline_name(&matejko, &paths.original_name, &bytes);
+        paths.baseline = matejko.join(&name);
+        paths.original_name = name;
+        (bytes.clone(), None, open.to_path_buf())
     } else if paths.baseline.is_file() {
         let baseline_bytes = fs::read(&paths.baseline).map_err(|err| err.to_string())?;
         (baseline_bytes, None, paths.baseline.clone())
@@ -381,6 +431,7 @@ fn write_render(
     write_atomic(dest, &rendered)?;
     let adj = AdjFile {
         original: original_name.to_string(),
+        written: Some(content_hash(&rendered)),
         adjustments: adjustments.clone(),
     };
     write_atomic(adj_path, adj.to_json().as_bytes())?;
@@ -1059,6 +1110,7 @@ mod tests {
     fn an_adj_from_before_keystone_still_opens() {
         let mut adj = AdjFile {
             original: "a.jpg".into(),
+            written: None,
             adjustments: Adjustments::defaults(90),
         };
         adj.adjustments.vertical = 12.0;
@@ -1117,6 +1169,76 @@ mod tests {
         assert_eq!(later.paths.original_name, "photo_2.jpg");
         // Copies saved elsewhere write nothing beside the photo itself.
         assert!(!home.join(".matejko").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn other_jpeg() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .write_image(&[20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240], 2, 2, ExtendedColorType::Rgb8)
+            .unwrap();
+        jpeg
+    }
+
+    #[test]
+    fn another_photo_under_a_saved_name_starts_a_new_session() {
+        let dir = temp_dir("reused-name");
+        let path = dir.join("photo.jpg");
+        let first = tagged_jpeg();
+        fs::write(&path, &first).unwrap();
+        let session = load_session(&path).unwrap();
+        let mut changed = session.adjustments.clone();
+        changed.exposure_ev = 0.5;
+        save_over(&session, &changed).unwrap();
+        // The saved version opens with its adjustments.
+        let again = load_session(&path).unwrap();
+        assert!(again.had_adj);
+        assert_eq!(again.adjustments.exposure_ev, 0.5);
+
+        // A different photo takes the name.
+        let second = other_jpeg();
+        fs::write(&path, &second).unwrap();
+        let fresh = load_session(&path).unwrap();
+        assert!(!fresh.had_adj);
+        assert_eq!(fresh.adjustments.exposure_ev, 0.0);
+        assert_eq!(fresh.baseline_bytes, second);
+        assert_eq!(fresh.paths.original_name, "photo_2.jpg");
+
+        // Its save keeps the first photo's baseline and adds its own.
+        save_over(&fresh, &changed).unwrap();
+        let matejko = dir.join(".matejko");
+        assert_eq!(fs::read(matejko.join("photo.jpg")).unwrap(), first);
+        assert_eq!(fs::read(matejko.join("photo_2.jpg")).unwrap(), second);
+        let later = load_session(&path).unwrap();
+        assert!(later.had_adj);
+        assert_eq!(later.baseline_bytes, second);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_adj_without_a_hash_is_trusted_as_before() {
+        let dir = temp_dir("no-hash");
+        let path = dir.join("photo.jpg");
+        let first = tagged_jpeg();
+        fs::write(&path, &first).unwrap();
+        let session = load_session(&path).unwrap();
+        let mut changed = session.adjustments.clone();
+        changed.exposure_ev = 0.5;
+        save_over(&session, &changed).unwrap();
+        let adj_path = dir.join(".matejko").join("photo.matejko_adj");
+        let old: String = fs::read_to_string(&adj_path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.contains("\"written\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(AdjFile::parse(&old).unwrap().written.is_none());
+        fs::write(&adj_path, old).unwrap();
+
+        fs::write(&path, other_jpeg()).unwrap();
+        let loaded = load_session(&path).unwrap();
+        assert!(loaded.had_adj);
+        assert_eq!(loaded.baseline_bytes, first);
         let _ = fs::remove_dir_all(&dir);
     }
 

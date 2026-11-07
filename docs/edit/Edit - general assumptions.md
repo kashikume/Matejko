@@ -47,14 +47,16 @@ Save writes over the file that is open. It does this in order:
 
 1. If `.matejko` does not exist, create it.
 2. If the baseline does not exist, and the open file is the original, copy that file's bytes to `.matejko/<original>`. The copy keeps the file's modified and created dates, so the baseline still carries the camera file's dates. This happens before the render replaces the open file. A later save leaves the baseline where it is.
-3. Write `.matejko/<stem of the open file>.matejko_adj` from the controls as they are now. Its `original` field is the original file name.
+3. Write `.matejko/<stem of the open file>.matejko_adj` from the controls as they are now. Its `original` field is the original file name. Its `written` field is a 64-bit FNV-1a hash of the JPEG the save writes, in hex.
 4. Render the baseline plus that adj over the open file.
 
 Save as copy asks for a file name with the Windows Save As dialog, which opens in the photo's folder, and writes a new JPEG there. Any folder will do. The open file is left as it is. The same first two steps create the baseline when the open file is still the untouched original. The adj is `.matejko/<stem of the new name>.matejko_adj`, and its `original` field is that same original file name. The render goes to the new name. A second version adds another JPEG and another adj, and the baseline stays the one file. If the chosen name is already in the folder, the user confirms before that JPEG and its adj are replaced.
 
 A copy in another folder writes nothing beside the open photo. It gets a `.matejko` of its own in its folder, created if needed, and a byte copy of the session's baseline there, so a later visit to the copy finds everything it needs in one folder. A baseline of that name already there with the same bytes is reused. One with other bytes belongs to a different photo and is left alone: the copy's baseline takes the next free name, `<stem>_2.jpg`, `<stem>_3.jpg`, and so on, and the adj's `original` field names it.
 
-On a later visit, adj and baseline both present: decode `.matejko/<original>`, apply the adj. The browsed file is ignored for the edit session, even when it is a previous render of these same numbers. Applying the adj to the render would bake the edit twice.
+On a later visit, the adj is checked first. When it has a `written` hash and the open file's bytes hash to something else, the adj belongs to another photo that had this name, or the photo was changed outside Matejko since the save. The adj is ignored and the open file is the original of a new session, with every control at default. Its baseline cannot take `.matejko/<name>`, which holds the other photo's: it takes the next free name, `<stem>_2.jpg` and so on, as a copy in another folder does, and the first save writes it there and replaces the adj. An adj with no `written` field, from an older version, is used as below.
+
+Adj and baseline both present: decode `.matejko/<original>`, apply the adj. The browsed file is ignored for the edit session, even when it is a previous render of these same numbers. Applying the adj to the render would bake the edit twice.
 
 Adj present, baseline missing: do not apply the adj to the browsed file, and do not create a baseline from that render. Editing needs the baseline.
 
