@@ -2662,6 +2662,11 @@ fn copy_geometry(tone: &mut Adjustments, geometry: &Adjustments) {
     tone.mirror_horizontal = geometry.mirror_horizontal;
     tone.mirror_vertical = geometry.mirror_vertical;
     tone.rotation = geometry.rotation;
+    // The frame is stored in the usable rectangle, which keystone and lens
+    // correction shape as much as the rotation does.
+    tone.vertical = geometry.vertical;
+    tone.horizontal = geometry.horizontal;
+    tone.distortion = geometry.distortion;
     tone.aspect = geometry.aspect;
     tone.frame = geometry.frame;
 }
@@ -2947,6 +2952,29 @@ fn app_icon() -> Option<Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framed_compare_views_keep_all_the_geometry_and_none_of_the_tone() {
+        let mut current = Adjustments::defaults(90);
+        current.quarter_turns = 1;
+        current.mirror_horizontal = true;
+        current.rotation = 3.0;
+        current.vertical = 20.0;
+        current.horizontal = -15.0;
+        current.distortion = 10.0;
+        current.frame = EditFrame { x: 0.1, y: 0.2, w: 0.5, h: 0.6 };
+        current.exposure_ev = 1.0;
+        let mut framed = Adjustments::defaults(90);
+        copy_geometry(&mut framed, &current);
+        assert_eq!(
+            (framed.vertical, framed.horizontal, framed.distortion),
+            (20.0, -15.0, 10.0)
+        );
+        assert_eq!((framed.quarter_turns, framed.rotation), (1, 3.0));
+        assert!(framed.mirror_horizontal);
+        assert_eq!(framed.frame, current.frame);
+        assert_eq!(framed.exposure_ev, 0.0);
+    }
 
     #[test]
     fn a_copy_is_a_jpeg_anywhere_but_not_the_open_photo() {

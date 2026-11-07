@@ -28,13 +28,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 Fix: call `edit_release()` and clear `seeking` there.
 
-### 4. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
-
-[app.rs:2660](../../src/app.rs#L2660)
-
-`copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
-
-### 5. A brief folder read error closes the app
+### 4. A brief folder read error closes the app
 
 [catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:927](../../src/app.rs#L927)
 
@@ -42,7 +36,7 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 6. Minor bugs
+### 5. Minor bugs
 
 - In edit mode, a window resize refits the picture to the whole window instead of `picture_window()`, so a fitted picture slides under the panel ([app.rs:2241](../../src/app.rs#L2241)). Dragging the divider doesn't refit at all ([app.rs:1525](../../src/app.rs#L1525)). The next render puts it right.
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.

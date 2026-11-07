@@ -120,7 +120,7 @@ The picture shows the current controls unless one of those buttons is held. O is
 | Original with this rotation and frame | Defaults | Current |
 | Last save with this rotation and frame | Last save | Current |
 
-Original is the baseline with every image control at default. The two "this rotation and frame" views use the current quarter turns and mirrors as well as the current rotation and frame, so the photo is the same way up and the same crop is on screen. Tone is the only thing that changes between those two and the current view.
+Original is the baseline with every image control at default. The two "this rotation and frame" views use the current quarter turns and mirrors as well as the current rotation, keystone, lens distortion, aspect, and frame, so the photo is the same way up and the same crop is on screen. Tone is the only thing that changes between those two and the current view.
 
 Zoom and pan stay where they are while a button is held, so the same spot can be compared. The histogram follows the picture on screen.
 
