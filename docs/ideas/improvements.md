@@ -1,6 +1,6 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against commit `115fc3c`.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that dropped the EXIF thumbnail.
 
 ## Bugs
 
@@ -27,29 +27,21 @@ The result is a lasting "Couldn't decode" or a truncated picture.
 
 Fix: have the decoder read the stamp before decoding and return it with the result, or re-queue paths that are mid-decode when their stamp changes.
 
-### 3. Saved JPEGs keep the old embedded thumbnail
+### 3. A long EXIF block can corrupt the saved file
 
-[files.rs:523](../../src/edit/files.rs#L523)
-
-`patch_exif` copies the baseline's APP1 block as it is, including the IFD1 thumbnail. Explorer and many viewers show that thumbnail, so they show the unedited, uncropped, unrotated photo.
-
-Fix: drop IFD1 (set IFD0's next-IFD offset to 0) or write a new thumbnail.
-
-### 4. A long EXIF block can corrupt the saved file
-
-[files.rs:727](../../src/edit/files.rs#L727)
+[files.rs:734](../../src/edit/files.rs#L734)
 
 `(app1.len() - 2) as u16` wraps silently. Cameras with large maker notes have APP1 blocks close to 64 KB, and appending the Software text pushes them over, which makes the JPEG invalid.
 
-Fix: skip the Software change when it doesn't fit, or drop the thumbnail first to make room. Similarly, `image.width as u16` in [files.rs:420](../../src/edit/files.rs#L420) should use `u16::try_from` and return an error.
+Fix: skip the Software change when it doesn't fit, or cut out the unreferenced thumbnail bytes (IFD1 is no longer linked, but its data is still in the segment) to make room. Similarly, `image.width as u16` in [files.rs:420](../../src/edit/files.rs#L420) should use `u16::try_from` and return an error.
 
-### 5. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
+### 4. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
 [app.rs:2570](../../src/app.rs#L2570)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
-### 6. A brief folder read error closes the app
+### 5. A brief folder read error closes the app
 
 [catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:897](../../src/app.rs#L897)
 
@@ -57,13 +49,13 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 7. A failed edit load shows its error on the wrong file
+### 6. A failed edit load shows its error on the wrong file
 
 [app.rs:2328](../../src/app.rs#L2328)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
-### 8. Minor bugs
+### 7. Minor bugs
 
 - [decode.rs:170](../../src/decode.rs#L170): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:502](../../src/gpu.rs#L502)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.

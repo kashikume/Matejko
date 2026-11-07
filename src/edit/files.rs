@@ -635,6 +635,13 @@ fn patch_tiff(app1: &mut Vec<u8>, width: u32, height: u32) {
             _ => {}
         }
     }
+    // IFD1 holds the camera's thumbnail, which shows the photo before the
+    // edit. Ending the IFD chain after IFD0 drops it, so viewers make their
+    // own from the saved picture. Its bytes stay in the segment, unreferenced.
+    let next_ifd = ifd + 2 + count * 12;
+    if next_ifd + 4 <= app1.len() {
+        app1[next_ifd..next_ifd + 4].fill(0);
+    }
     if let Some(offset) = exif_offset {
         let sub = tiff + offset as usize;
         if sub + 2 <= app1.len() {
@@ -771,6 +778,11 @@ mod tests {
     }
 
     fn inject_exif(jpeg: &[u8]) -> Vec<u8> {
+        inject_exif_with(jpeg, false)
+    }
+
+    /// `thumbnail` adds an IFD1, as a camera writes for its thumbnail.
+    fn inject_exif_with(jpeg: &[u8], thumbnail: bool) -> Vec<u8> {
         // Little-endian TIFF, IFD with Orientation, Software, GPSLatitude, and pixel size.
         let software = b"TestCam\0";
         let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
@@ -800,6 +812,15 @@ mod tests {
         }
         write_u32_at(&mut tiff, software_entry_at + 8, software_offset);
         write_u32_at(&mut tiff, gps_entry_at + 8, gps_offset);
+        if thumbnail {
+            // IFD0's next-IFD pointer follows its five entries.
+            let ifd1 = tiff.len() as u32;
+            write_u32_at(&mut tiff, 8 + 2 + 5 * 12, ifd1);
+            tiff.extend_from_slice(&1u16.to_le_bytes());
+            // Compression = 6, JPEG: the tag a thumbnail IFD carries.
+            push_entry(&mut tiff, 0x0103, 3, 1, 6);
+            tiff.extend_from_slice(&0u32.to_le_bytes());
+        }
         let mut app1 = vec![0xFF, 0xE1, 0, 0];
         app1.extend_from_slice(b"Exif\0\0");
         app1.extend_from_slice(&tiff);
@@ -822,6 +843,28 @@ mod tests {
 
     fn write_u32_at(buf: &mut [u8], at: usize, value: u32) {
         buf[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn a_save_drops_the_cameras_thumbnail_and_keeps_the_rest() {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .write_image(&[128; 4 * 2 * 3], 4, 2, ExtendedColorType::Rgb8)
+            .unwrap();
+        let baseline = inject_exif_with(&jpeg, true);
+        let read = |bytes: &[u8]| {
+            exif::Reader::new()
+                .read_from_container(&mut Cursor::new(bytes))
+                .unwrap()
+        };
+        let before = read(&baseline);
+        assert!(before.get_field(exif::Tag::Compression, exif::In::THUMBNAIL).is_some());
+
+        let saved = read(&patch_exif(&jpeg, &baseline, 4, 2));
+        assert!(saved.get_field(exif::Tag::Compression, exif::In::THUMBNAIL).is_none());
+        assert!(saved.get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY).is_some());
+        let orientation = saved.get_field(exif::Tag::Orientation, exif::In::PRIMARY).unwrap();
+        assert_eq!(orientation.value.get_uint(0), Some(1));
     }
 
     #[test]
