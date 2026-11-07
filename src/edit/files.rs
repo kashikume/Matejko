@@ -618,21 +618,37 @@ fn luminance_dqt(bytes: &[u8]) -> Option<[u8; 64]> {
     None
 }
 
+/// Gives the encoded picture the baseline's EXIF, patched for the new
+/// pixels, and its ICC profile. The pipeline keeps the baseline's color
+/// values, so without the profile a Display P3 or Adobe RGB photo would be
+/// read as sRGB and look washed out.
 fn patch_exif(encoded: &[u8], baseline: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let Some(app1) = exif_app1(baseline) else {
+    let app1 = exif_app1(baseline).map(|app1| {
+        let mut app1 = app1.to_vec();
+        patch_tiff(&mut app1, width, height);
+        app1
+    });
+    let icc = icc_app2s(baseline);
+    if app1.is_none() && icc.is_empty() {
         return encoded.to_vec();
-    };
-    let mut app1 = app1.to_vec();
-    patch_tiff(&mut app1, width, height);
-    let stripped = strip_app1(encoded);
-    let mut out = Vec::with_capacity(stripped.len() + app1.len());
+    }
+    let stripped = strip_carried(encoded);
+    let extra = app1.as_ref().map_or(0, Vec::len) + icc.iter().map(|s| s.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(stripped.len() + extra);
     out.extend_from_slice(&stripped[..2]);
-    out.extend_from_slice(&app1);
+    if let Some(app1) = &app1 {
+        out.extend_from_slice(app1);
+    }
+    for segment in icc {
+        out.extend_from_slice(segment);
+    }
     out.extend_from_slice(&stripped[2..]);
     out
 }
 
-fn exif_app1(bytes: &[u8]) -> Option<&[u8]> {
+/// The marker segments before the scan, each with its marker and length.
+fn header_segments(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut segments = Vec::new();
     let mut i = 2;
     while i + 4 < bytes.len() && bytes[i] == 0xFF {
         let marker = bytes[i + 1];
@@ -643,15 +659,35 @@ fn exif_app1(bytes: &[u8]) -> Option<&[u8]> {
         if len < 2 || i + 2 + len > bytes.len() {
             break;
         }
-        if marker == 0xE1 && bytes[i + 4..].starts_with(b"Exif\0\0") {
-            return Some(&bytes[i..i + 2 + len]);
-        }
+        segments.push(&bytes[i..i + 2 + len]);
         i += 2 + len;
     }
-    None
+    segments
 }
 
-fn strip_app1(bytes: &[u8]) -> Vec<u8> {
+fn is_exif_app1(segment: &[u8]) -> bool {
+    segment[1] == 0xE1 && segment[4..].starts_with(b"Exif\0\0")
+}
+
+fn is_icc_app2(segment: &[u8]) -> bool {
+    segment[1] == 0xE2 && segment[4..].starts_with(b"ICC_PROFILE\0")
+}
+
+fn exif_app1(bytes: &[u8]) -> Option<&[u8]> {
+    header_segments(bytes).into_iter().find(|segment| is_exif_app1(segment))
+}
+
+/// The ICC profile's APP2 segments, in file order. A large profile is
+/// split across several, each numbered, so all of them are kept.
+fn icc_app2s(bytes: &[u8]) -> Vec<&[u8]> {
+    header_segments(bytes)
+        .into_iter()
+        .filter(|segment| is_icc_app2(segment))
+        .collect()
+}
+
+/// `bytes` without its EXIF APP1 and ICC APP2 segments.
+fn strip_carried(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() < 2 {
         return bytes.to_vec();
     }
@@ -667,9 +703,9 @@ fn strip_app1(bytes: &[u8]) -> Vec<u8> {
         if len < 2 || i + 2 + len > bytes.len() {
             break;
         }
-        let keep = marker != 0xE1 || !bytes[i + 4..].starts_with(b"Exif\0\0");
-        if keep {
-            out.extend_from_slice(&bytes[i..i + 2 + len]);
+        let segment = &bytes[i..i + 2 + len];
+        if !is_exif_app1(segment) && !is_icc_app2(segment) {
+            out.extend_from_slice(segment);
         }
         i += 2 + len;
     }
@@ -970,6 +1006,52 @@ mod tests {
         assert!(saved.get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY).is_some());
         let orientation = saved.get_field(exif::Tag::Orientation, exif::In::PRIMARY).unwrap();
         assert_eq!(orientation.value.get_uint(0), Some(1));
+    }
+
+    /// `jpeg` with an ICC profile split over two APP2 segments after SOI.
+    fn inject_icc(jpeg: &[u8]) -> (Vec<u8>, [Vec<u8>; 2]) {
+        let segment = |index: u8, body: &[u8]| {
+            let mut out = vec![0xFF, 0xE2, 0, 0];
+            out.extend_from_slice(b"ICC_PROFILE\0");
+            out.extend_from_slice(&[index, 2]);
+            out.extend_from_slice(body);
+            let len = (out.len() - 2) as u16;
+            out[2..4].copy_from_slice(&len.to_be_bytes());
+            out
+        };
+        let parts = [segment(1, b"first half of a profile"), segment(2, b"second half")];
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&parts[0]);
+        out.extend_from_slice(&parts[1]);
+        out.extend_from_slice(&jpeg[2..]);
+        (out, parts)
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|window| window == needle)
+    }
+
+    #[test]
+    fn a_save_keeps_the_icc_profile() {
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .write_image(&[128; 4 * 2 * 3], 4, 2, ExtendedColorType::Rgb8)
+            .unwrap();
+        for baseline in [inject_icc(&inject_exif(&jpeg)), inject_icc(&jpeg)] {
+            let (baseline, parts) = baseline;
+            let saved = patch_exif(&jpeg, &baseline, 4, 2);
+            // Both parts, once each and in order.
+            let first = contains(&saved, &parts[0]).expect("first part");
+            let second = contains(&saved, &parts[1]).expect("second part");
+            assert!(first < second);
+            assert_eq!(icc_app2s(&saved), [&parts[0][..], &parts[1][..]]);
+            // Patching a picture that already carries them adds no second copy.
+            assert_eq!(icc_app2s(&patch_exif(&saved, &baseline, 4, 2)).len(), 2);
+            let decoded = image::load_from_memory(&saved).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (4, 2));
+        }
+        // A baseline with neither is passed through.
+        assert_eq!(patch_exif(&jpeg, &jpeg, 4, 2), jpeg);
     }
 
     #[test]

@@ -140,7 +140,7 @@ I dims the picture and draws a summary for the current file: name, folder, file 
 
 The panel is a column on the right, starting near a quarter of the window, with a draggable divider. It shows a histogram of the framed picture, a guide button (none, thirds, center, pointer), mirror and 90° buttons, the sliders, JPEG quality, the compare row O / Of / S / Sf, then Save, Save as copy, and Exit. Guides are screen-space lines, one at a time, and they are not saved. O, Of, S, and Sf show that picture only while held. Zoom and pan stay. Unlike the viewer, the wheel zooms out past the fitted size, down to a tenth of it, so the frame and the margin around it can be seen whole. S and Sf do nothing until the open file has a save. Save writes the current controls into the open JPEG. Save as copy opens the Windows Save As dialog in the photo's folder, with `<name>_copy.jpg` filled in. Any folder will do. The dialog asks before replacing a file. A name that is not `.jpg` or `.jpeg`, or the open file itself, is refused with a message on the panel. A copy in another folder takes its baseline along into that folder's `.matejko`. The session stays on the open file.
 
-The baseline is a byte copy in `.matejko`, taken once before the first overwrite. Later versions share that file. Adjustments are a JSON file beside it. The pipeline is the one in `docs/edit`. While a slider or the frame is moving, the run uses a long-side-1600 preview. Releasing, and the 90°, mirror, and shape clicks, run the full baseline. An untouched picture whose quality is still the file's estimate is copied byte for byte. A re-encode is 4:4:4, keeps the other EXIF tags, sets orientation to normal, writes the new pixel size, and appends `edited with Matejko <version>` to Software once.
+The baseline is a byte copy in `.matejko`, taken once before the first overwrite. Later versions share that file. Adjustments are a JSON file beside it. The pipeline is the one in `docs/edit`. While a slider or the frame is moving, the run uses a long-side-1600 preview. Releasing, and the 90°, mirror, and shape clicks, run the full baseline. An untouched picture whose quality is still the file's estimate is copied byte for byte. A re-encode is 4:4:4, keeps the other EXIF tags and the ICC profile, sets orientation to normal, writes the new pixel size, and appends `edited with Matejko <version>` to Software once.
 
 ### Orientation and decode
 
@@ -166,7 +166,7 @@ A file that will not play stays in the list. The window shows the file name and 
 ### Known limitations
 
 - Very large images are fully decoded. A 24 megapixel photo is on the order of 100 MB of RGBA. There is no tiled viewer and no memory cap in the first version.
-- ICC profiles are ignored. GPS and other EXIF tags appear only in the information overlay; they are not used for viewing.
+- ICC profiles are ignored for display. A saved edit keeps the photo's profile. GPS and other EXIF tags appear only in the information overlay; they are not used for viewing.
 - Preload does not cross a gap created by a file that is slow to decode; the visible file is always requested first.
 - Each video frame is copied into the picture texture. A 1080p frame is cheap. A 4K frame is a large copy. There is no zero-copy path into the GPU.
 

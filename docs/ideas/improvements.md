@@ -4,15 +4,7 @@ Status: findings from read-throughs of all of `src/` on 2026-11-07. Items are re
 
 ## Bugs
 
-### 1. A saved photo loses its ICC profile
-
-[files.rs:570](../../src/edit/files.rs#L570)
-
-`patch_exif` carries over only the EXIF APP1. The baseline's APP2 `ICC_PROFILE` segments are dropped. The pipeline leaves Display P3 or Adobe RGB values as they are, so once the profile is gone, color-managed viewers read them as sRGB and the saved photo looks desaturated. iPhone JPEGs are Display P3.
-
-Fix: copy the baseline's APP2 ICC segments into the output.
-
-### 2. A second E while the baseline loads replaces the session
+### 1. A second E while the baseline loads replaces the session
 
 [app.rs:1061](../../src/app.rs#L1061)
 
@@ -20,7 +12,7 @@ The mode stays Viewing until the baseline arrives, so a second E on a large JPEG
 
 Fix: return early when `self.editing.is_some()`.
 
-### 3. Pressing E can be lost: the decoder thread misses its wake-up
+### 2. Pressing E can be lost: the decoder thread misses its wake-up
 
 [decode.rs:132](../../src/decode.rs#L132)
 
@@ -28,7 +20,7 @@ Fix: return early when `self.editing.is_some()`.
 
 Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
-### 4. Losing focus mid-drag leaves the drag running
+### 3. Losing focus mid-drag leaves the drag running
 
 [app.rs:2476](../../src/app.rs#L2476)
 
@@ -36,13 +28,13 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 Fix: call `edit_release()` and clear `seeking` there.
 
-### 5. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
+### 4. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
 [app.rs:2660](../../src/app.rs#L2660)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
-### 6. A brief folder read error closes the app
+### 5. A brief folder read error closes the app
 
 [catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:927](../../src/app.rs#L927)
 
@@ -50,7 +42,7 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 7. Minor bugs
+### 6. Minor bugs
 
 - In edit mode, a window resize refits the picture to the whole window instead of `picture_window()`, so a fitted picture slides under the panel ([app.rs:2241](../../src/app.rs#L2241)). Dragging the divider doesn't refit at all ([app.rs:1525](../../src/app.rs#L1525)). The next render puts it right.
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
