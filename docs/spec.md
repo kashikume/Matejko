@@ -147,7 +147,7 @@ The baseline is a byte copy in `.matejko`, taken once before the first overwrite
 - JPEG EXIF orientation is applied when the file is decoded, so phone photos are upright.
 - Decode runs off the UI thread. Until the new image is ready, the previous picture stays on screen. If the user moves on before a decode finishes, that result is discarded.
 - A file that takes longer than 1 second to show (a large photo, or one a cloud drive must download first) gets a blue spinning wheel over the previous picture. It sits at the left edge after a move back (Left, Page Up, Home) and at the right edge after a move forward, vertically centered, and at the center for the file opened at startup. It fades in, and fades out as soon as the new picture or its error is on screen.
-- Left or Page Up on the first file, and Right or Page Down on the last, show a red cross on that side of the window for 2 seconds. It fades in and out. Another press while it is up keeps it there instead of blinking.
+- Left or Page Up on the first file, and Right or Page Down on the last, show a red cross on that side of the window for 1 second. It fades in and out. Another press while it is up keeps it there instead of blinking.
 - The decoded image is RGBA8. Zoom and pan only change the draw transform; they do not decode again.
 - The next and previous images may be decoded ahead of time. MP4s are not decoded ahead.
 

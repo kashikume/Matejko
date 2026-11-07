@@ -18,7 +18,7 @@ const WHEEL_FADE_OUT: Duration = Duration::from_millis(450);
 const WHEEL_SPEED: f32 = 1.1;
 
 /// How long the cross stays, fades included.
-pub const CROSS_FOR: Duration = Duration::from_secs(2);
+pub const CROSS_FOR: Duration = Duration::from_secs(1);
 const CROSS_FADE_IN: Duration = Duration::from_millis(180);
 const CROSS_FADE_OUT: Duration = Duration::from_millis(450);
 
@@ -389,14 +389,15 @@ mod tests {
     }
 
     #[test]
-    fn the_cross_fades_in_holds_and_fades_out_within_two_seconds() {
+    fn the_cross_fades_in_holds_and_fades_out_within_a_second() {
         let start = Instant::now();
         let cross = EdgeCross::trigger(None, start, Side::Left);
         assert_eq!(cross.alpha(start), 0.0);
-        assert_eq!(cross.alpha(start + Duration::from_secs(1)), 1.0);
+        // Held between the fade-in and the fade-out.
+        assert_eq!(cross.alpha(start + CROSS_FADE_IN + Duration::from_millis(50)), 1.0);
         let fading = cross.alpha(start + CROSS_FOR - CROSS_FADE_OUT / 2);
         assert!(fading > 0.0 && fading < 1.0);
-        assert!(!cross.done(start + Duration::from_millis(1999)));
+        assert!(!cross.done(start + CROSS_FOR - Duration::from_millis(1)));
         assert!(cross.done(start + CROSS_FOR));
         assert_eq!(cross.alpha(start + CROSS_FOR), 0.0);
     }
@@ -405,11 +406,12 @@ mod tests {
     fn another_press_keeps_the_cross_up_without_blinking() {
         let start = Instant::now();
         let first = EdgeCross::trigger(None, start, Side::Right);
-        let later = start + Duration::from_millis(1800);
+        // Partway through the fade-out.
+        let later = start + CROSS_FOR - Duration::from_millis(200);
         let before = first.alpha(later);
         let again = EdgeCross::trigger(Some(first), later, Side::Right);
         assert!((again.alpha(later) - before).abs() < 0.02);
-        assert!(again.alpha(later + Duration::from_secs(1)) == 1.0);
+        assert!(again.alpha(later + Duration::from_millis(300)) == 1.0);
         let other = EdgeCross::trigger(Some(first), later, Side::Left);
         assert_eq!(other.alpha(later), 0.0);
     }
