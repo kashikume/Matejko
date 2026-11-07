@@ -443,6 +443,13 @@ pub fn decode_jpeg_linear(bytes: &[u8]) -> Result<Image, String> {
 }
 
 pub fn encode_jpeg_444(image: &Image, quality: u8) -> Result<Vec<u8>, String> {
+    let side = |pixels: u32| u16::try_from(pixels).ok().filter(|side| *side > 0);
+    let (Some(width), Some(height)) = (side(image.width), side(image.height)) else {
+        return Err(format!(
+            "This picture is too large to save as a JPEG ({} × {}). A JPEG side is at most 65,535 pixels.",
+            image.width, image.height
+        ));
+    };
     let rgba = image.to_rgba8(true);
     let mut rgb = Vec::with_capacity((rgba.len() / 4) * 3);
     for px in rgba.chunks_exact(4) {
@@ -454,8 +461,8 @@ pub fn encode_jpeg_444(image: &Image, quality: u8) -> Result<Vec<u8>, String> {
     encoder
         .encode(
             &rgb,
-            image.width as u16,
-            image.height as u16,
+            width,
+            height,
             jpeg_encoder::ColorType::Rgb,
         )
         .map_err(|err| err.to_string())?;
@@ -747,6 +754,13 @@ fn software_value(buf: &[u8], tiff: usize, at: usize, typ: u16, count: u32, le: 
 fn write_software(app1: &mut Vec<u8>, tiff: usize, at: usize, text: &str, le: bool) {
     let mut bytes = text.as_bytes().to_vec();
     bytes.push(0);
+    // A JPEG segment's length is 16 bits and counts itself but not the
+    // marker. Text that would push a full APP1 past that is not added, and
+    // the camera's Software entry stays as it was.
+    const MAX_SEGMENT: usize = u16::MAX as usize;
+    if bytes.len() > 4 && app1.len() - 2 + bytes.len() > MAX_SEGMENT {
+        return;
+    }
     let count = bytes.len() as u32;
     let write_u16 = |buf: &mut Vec<u8>, pos: usize, value: u16| {
         let raw = if le { value.to_le_bytes() } else { value.to_be_bytes() };
@@ -940,6 +954,49 @@ mod tests {
         assert_eq!(dates(&other.join(".matejko").join("photo.jpg")), (taken, created));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&other);
+    }
+
+    /// An APP1 of `total` bytes, marker included, with a Software entry at
+    /// byte 20 that holds "Cam" inline.
+    fn app1_of(total: usize) -> Vec<u8> {
+        let mut app1 = vec![0u8; total];
+        app1[..4].copy_from_slice(&[0xFF, 0xE1, ((total - 2) >> 8) as u8, (total - 2) as u8]);
+        app1[4..10].copy_from_slice(b"Exif\0\0");
+        app1[10..12].copy_from_slice(b"II");
+        app1[20..32].copy_from_slice(&[0x31, 0x01, 2, 0, 4, 0, 0, 0, b'C', b'a', b'm', 0]);
+        app1
+    }
+
+    #[test]
+    fn software_text_that_would_overflow_the_segment_is_left_out() {
+        let text = "Cam, edited with Matejko";
+        // Room for it: the text is appended and the length follows.
+        let mut roomy = app1_of(1000);
+        write_software(&mut roomy, 10, 20, text, true);
+        assert_eq!(roomy.len(), 1000 + text.len() + 1);
+        assert_eq!(u16::from_be_bytes([roomy[2], roomy[3]]) as usize, roomy.len() - 2);
+        assert!(roomy.ends_with(b"edited with Matejko\0"));
+
+        // A segment at the limit stays as it was, byte for byte.
+        let full = app1_of(65_537 - text.len());
+        let mut patched = full.clone();
+        write_software(&mut patched, 10, 20, text, true);
+        assert_eq!(patched, full);
+
+        // One byte smaller fits exactly: a length of 65,535.
+        let mut edge = app1_of(65_536 - text.len());
+        write_software(&mut edge, 10, 20, text, true);
+        assert_eq!(u16::from_be_bytes([edge[2], edge[3]]), u16::MAX);
+        assert_eq!(edge.len() - 2, u16::MAX as usize);
+    }
+
+    #[test]
+    fn a_picture_wider_than_a_jpeg_allows_is_refused() {
+        let wide = Image::new(70_000, 1, vec![0.5; 70_000 * 3]);
+        let err = encode_jpeg_444(&wide, 90).unwrap_err();
+        assert!(err.contains("70000 × 1"), "{err}");
+        let fine = Image::new(3, 2, vec![0.5; 3 * 2 * 3]);
+        assert!(encode_jpeg_444(&fine, 90).is_ok());
     }
 
     #[test]
