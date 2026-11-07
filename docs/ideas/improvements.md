@@ -22,7 +22,6 @@ Fix: a failed scan should keep the current list.
 
 ### 3. Minor bugs
 
-- In edit mode, a window resize refits the picture to the whole window instead of `picture_window()`, so a fitted picture slides under the panel ([app.rs:2241](../../src/app.rs#L2241)). Dragging the divider doesn't refit at all ([app.rs:1525](../../src/app.rs#L1525)). The next render puts it right.
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:523](../../src/gpu.rs#L523)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
 

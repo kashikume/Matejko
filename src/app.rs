@@ -1210,10 +1210,17 @@ impl App {
         self.request_redraw();
     }
 
+    /// The part of the window the picture has: all of it, or in edit mode
+    /// the part left of the panel.
     fn picture_window(&self) -> Vec2 {
+        self.picture_area(self.window_size)
+    }
+
+    /// `picture_window` for a window of `window` size.
+    fn picture_area(&self, window: Vec2) -> Vec2 {
         let split = self.editing.as_ref().map(|editing| editing.split).unwrap_or(0.0);
-        let width = self.window_size.x * (1.0 - split.clamp(0.0, 0.5));
-        Vec2::new(width.max(1.0), self.window_size.y.max(1.0))
+        let width = window.x * (1.0 - split.clamp(0.0, 0.5));
+        Vec2::new(width.max(1.0), window.y.max(1.0))
     }
 
     fn edit_panel(&self) -> Option<crate::edit::Panel> {
@@ -1539,8 +1546,15 @@ impl App {
         match pointer {
             Some(EditPointer::Divider) => {
                 let split = (1.0 - cursor.x / self.window_size.x.max(1.0)).clamp(0.18, 0.5);
+                let old = self.picture_window();
                 if let Some(editing) = &mut self.editing {
                     editing.split = split;
+                }
+                // A fitted picture refits to the new space. A zoomed one keeps
+                // its scale and the point at the centre of that space.
+                let new = self.picture_window();
+                if old != new {
+                    self.view.on_resize(old, new, self.image_size());
                 }
                 self.request_redraw();
             }
@@ -2254,7 +2268,10 @@ impl App {
         let old = self.window_size;
         self.window_size = new;
         if self.image_shown() {
-            self.view.on_resize(old, new, self.image_size());
+            // In edit mode the picture keeps to the left of the panel. A
+            // window that had no size yet has no area to keep a point in.
+            let old = if old.x > 0.0 && old.y > 0.0 { self.picture_area(old) } else { old };
+            self.view.on_resize(old, self.picture_area(new), self.image_size());
         }
         if let Some(gpu) = &mut self.gpu {
             gpu.resize(size);
