@@ -40,7 +40,7 @@ E on a JPEG opens edit mode in the same window. PNG and video stay view-only. A 
 - a compare row (O / Of / S / Sf) that shows the original or the last save while held
 - Save, Save as copy, and Exit
 
-Save writes the edit into the open JPEG, after keeping a byte-for-byte baseline copy once in a `.matejko` folder beside it. Adjustments are stored there too, so they stay editable. Save as copy writes a new `.jpg` through the Save As dialog. Escape or E exits, and asks first if there are unsaved changes. The wheel can zoom out past the fitted size to show the margin around the frame.
+Save writes the edit into the open JPEG, after keeping a byte-for-byte baseline copy once in a `.matejko` folder beside it. Adjustments are stored there too, so they stay editable. Save as copy writes a new `.jpg` through the Save As dialog. Ctrl+S saves and Ctrl+Shift+S saves a copy. Escape or E exits, and asks first if there are unsaved changes. The wheel can zoom out past the fitted size to show the margin around the frame.
 
 Behavior is specified in [docs/spec.md](docs/spec.md).
 

@@ -110,7 +110,11 @@ Zoom is a scale against physical pixels. Scale `1.0` means one image pixel cover
 | F1 | Open help | Close help if help is open; otherwise ignored | Ignored | Ignored |
 | Space | Pause or play the current video. Ignored on a photo. | Ignored | Ignored | Ignored |
 | Escape | Leave fullscreen if fullscreen, otherwise quit | Close overlay | Cancel | Same as Exit. While the unsaved-changes question is up, Keep editing |
+| Ctrl+S | Ignored | Ignored | Ignored | Same as Save |
+| Ctrl+Shift+S | Ignored | Ignored | Ignored | Same as Save as copy |
 | Close, Alt+F4 | Quit | Quit | Quit | Quit |
+
+With Ctrl held, the other letter keys do nothing: Ctrl+E does not leave edit mode, and Ctrl+I does not open the information.
 
 Mouse wheel and drag keep working during help, info, and delete confirmation, so the picture stays visible behind the text.
 

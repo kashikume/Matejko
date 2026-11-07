@@ -53,6 +53,10 @@ pub enum Command {
     Map,
     Pause,
     Edit,
+    /// Ctrl+S.
+    Save,
+    /// Ctrl+Shift+S.
+    SaveCopy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +93,8 @@ pub enum Action {
     /// Escape or E in edit mode: what Exit does, or, while the unsaved-changes
     /// question is up, Escape answers Keep editing.
     ExitEdit { escape: bool },
+    /// Ctrl+S and Ctrl+Shift+S in edit mode: the Save and Save as copy buttons.
+    SaveEdit { copy: bool },
 }
 
 const PAGE_STEP: isize = 10;
@@ -140,6 +146,9 @@ pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
         (Mode::Viewing { .. }, Command::Edit) => Action::EnterEdit,
         (Mode::Editing, Command::Escape) => Action::ExitEdit { escape: true },
         (Mode::Editing, Command::Edit) => Action::ExitEdit { escape: false },
+        (Mode::Editing, Command::Save) => Action::SaveEdit { copy: false },
+        (Mode::Editing, Command::SaveCopy) => Action::SaveEdit { copy: true },
+        (Mode::Viewing { .. }, Command::Save | Command::SaveCopy) => Action::None,
         (Mode::Editing, _) => Action::None,
         (Mode::Help, Command::Escape | Command::Help) => Action::CancelOverlay,
         (Mode::Info, Command::Escape | Command::Info) => Action::CancelOverlay,
@@ -371,6 +380,7 @@ pub struct App {
     _watcher: Option<RecommendedWatcher>,
     editing: Option<Editing>,
     shift_down: bool,
+    ctrl_down: bool,
     cursor_icon: CursorIcon,
     /// The pointer is over the panel divider, or dragging it.
     divider_hot: bool,
@@ -421,6 +431,7 @@ impl App {
             _watcher: None,
             editing: None,
             shift_down: false,
+            ctrl_down: false,
             cursor_icon: CursorIcon::Default,
             divider_hot: false,
             hover: None,
@@ -527,6 +538,8 @@ impl App {
             Action::TogglePause => self.toggle_video_pause(),
             Action::EnterEdit => self.begin_edit(),
             Action::ExitEdit { escape } => self.exit_edit_key(escape),
+            Action::SaveEdit { copy: false } => self.save_edit(),
+            Action::SaveEdit { copy: true } => self.save_edit_copy(),
         }
     }
 
@@ -2377,6 +2390,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.shift_down = modifiers.state().shift_key();
+                self.ctrl_down = modifiers.state().control_key();
                 self.update_edit_cursor();
             }
             WindowEvent::Occluded(false) => self.request_redraw(),
@@ -2384,7 +2398,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if let Some(command) = command_from(&event.logical_key) {
+                if let Some(command) =
+                    command_from(&event.logical_key, self.ctrl_down, self.shift_down)
+                {
                     self.on_command(event_loop, command, event.repeat);
                 }
             }
@@ -2667,7 +2683,17 @@ fn copy_stem(path: &Path) -> String {
     format!("{stem}_copy.jpg")
 }
 
-fn command_from(key: &Key) -> Option<Command> {
+/// With Ctrl held, only Ctrl+S and Ctrl+Shift+S are commands, so a Ctrl
+/// chord never also acts as its plain letter (Ctrl+E does not leave edit mode).
+fn command_from(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
+    if ctrl {
+        return match key {
+            Key::Character(ch) if ch.eq_ignore_ascii_case("s") => {
+                Some(if shift { Command::SaveCopy } else { Command::Save })
+            }
+            _ => None,
+        };
+    }
     match key {
         Key::Named(NamedKey::ArrowLeft) => Some(Command::Left),
         Key::Named(NamedKey::ArrowRight) => Some(Command::Right),
@@ -2986,6 +3012,17 @@ mod tests {
             Action::ExitEdit { escape: false }
         );
         assert_eq!(action_for(Command::Escape, Mode::Editing, true), Action::None);
+        assert_eq!(
+            action_for(Command::Save, Mode::Editing, false),
+            Action::SaveEdit { copy: false }
+        );
+        assert_eq!(
+            action_for(Command::SaveCopy, Mode::Editing, false),
+            Action::SaveEdit { copy: true }
+        );
+        assert_eq!(action_for(Command::Save, Mode::Editing, true), Action::None);
+        assert_eq!(action_for(Command::Save, viewing, false), Action::None);
+        assert_eq!(action_for(Command::SaveCopy, Mode::Help, false), Action::None);
         assert_eq!(action_for(Command::Left, Mode::Editing, false), Action::None);
         assert_eq!(action_for(Command::Enter, Mode::Editing, false), Action::None);
         assert_eq!(action_for(Command::Delete, Mode::Editing, false), Action::None);
