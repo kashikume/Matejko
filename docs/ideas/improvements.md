@@ -4,15 +4,7 @@ Status: findings from read-throughs of all of `src/` on 2026-11-07. Items are re
 
 ## Bugs
 
-### 1. Losing focus mid-drag leaves the drag running
-
-[app.rs:2476](../../src/app.rs#L2476)
-
-`Focused(false)` clears `dragging` but not `editing.pointer`, `scrubbing`, or `seeking`. After Alt+Tab during a slider drag, the slider keeps following the pointer with no button held, and the full-size render never runs. A seek on the video bar sticks the same way.
-
-Fix: call `edit_release()` and clear `seeking` there.
-
-### 2. A brief folder read error closes the app
+### 1. A brief folder read error closes the app
 
 [catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:927](../../src/app.rs#L927)
 
@@ -20,7 +12,7 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 3. Minor bugs
+### 2. Minor bugs
 
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:523](../../src/gpu.rs#L523)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.

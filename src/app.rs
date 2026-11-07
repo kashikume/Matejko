@@ -2505,7 +2505,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.resize_to(size);
                 self.request_redraw();
             }
-            WindowEvent::Focused(false) => self.dragging = false,
+            WindowEvent::Focused(false) => {
+                // The button may come up in another window, and this one
+                // never hears it. Finish whatever the press started as a
+                // release would: a slider or frame drag gets its full-size
+                // render, a held compare button lets go, and a seek stops.
+                self.dragging = false;
+                self.seeking = false;
+                if self.editing.as_ref().is_some_and(|editing| {
+                    editing.pointer.is_some() || editing.holding.is_some() || editing.scrubbing
+                }) {
+                    self.edit_release();
+                }
+            }
             WindowEvent::CursorLeft { .. } => {
                 // The pointer guide hides while the pointer is off the photo.
                 self.cursor_valid = false;
