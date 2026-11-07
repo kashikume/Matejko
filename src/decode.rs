@@ -230,7 +230,11 @@ fn load_edit_baseline(path: &Path) -> Result<EditBaseline, String> {
 }
 
 pub fn decode_file(path: &Path, max_edge: u32) -> Result<DecodedImage, String> {
-    let reader = ImageReader::open(path).map_err(|err| err.to_string())?;
+    // The bytes name the format, not the extension: a PNG saved as .jpg
+    // still opens. Bytes that name nothing fall back to the extension.
+    let reader = ImageReader::open(path)
+        .and_then(ImageReader::with_guessed_format)
+        .map_err(|err| err.to_string())?;
     let mut decoder = reader
         .into_decoder()
         .map_err(|err| format!("Couldn't decode this file. {err}"))?;
@@ -384,6 +388,23 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let decoded = decode_file(&path, 64).unwrap();
         assert_eq!((decoded.width, decoded.height), (2, 2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_png_named_jpg_still_decodes() {
+        let image =
+            DynamicImage::ImageRgba8(image::RgbaImage::from_raw(3, 1, vec![9; 12]).unwrap());
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("matejko-misnamed-{}", std::process::id()));
+        fs_create(&dir);
+        let path = dir.join("actually_png.jpg");
+        std::fs::write(&path, bytes).unwrap();
+        let decoded = decode_file(&path, 64).unwrap();
+        assert_eq!((decoded.width, decoded.height), (3, 1));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
