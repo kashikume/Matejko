@@ -302,7 +302,7 @@ pub fn save_copy(
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if !paths.baseline.exists() {
-        fs::write(&paths.baseline, &session.baseline_bytes).map_err(|err| err.to_string())?;
+        write_atomic(&paths.baseline, &session.baseline_bytes)?;
     }
     write_render(
         &paths.open,
@@ -331,7 +331,7 @@ fn write_render(
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if !baseline_path.exists() {
-        fs::write(baseline_path, baseline_bytes).map_err(|err| err.to_string())?;
+        write_atomic(baseline_path, baseline_bytes)?;
     }
     let rendered = if adjustments.is_identity(estimated_quality) {
         baseline_bytes.to_vec()
@@ -351,13 +351,39 @@ fn write_render(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    fs::write(dest, rendered).map_err(|err| err.to_string())?;
+    write_atomic(dest, &rendered)?;
     let adj = AdjFile {
         original: original_name.to_string(),
         adjustments: adjustments.clone(),
     };
-    fs::write(adj_path, adj.to_json()).map_err(|err| err.to_string())?;
+    write_atomic(adj_path, adj.to_json().as_bytes())?;
     Ok(())
+}
+
+/// Writes `bytes` to a temporary file beside `path`, flushes it to disk, then
+/// renames it over `path`. A crash or a full disk leaves either the old file
+/// or the new one, never half of it, and the folder watcher never sees a
+/// partly written photo. The temporary name ends in `.matejko-tmp`, which
+/// the browsing list does not show.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let temp = path.with_file_name(format!(".{name}.{}.matejko-tmp", std::process::id()));
+    let written = (|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    written.map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        err.to_string()
+    })
 }
 
 /// Decodes with EXIF orientation applied, as the viewer does, so the
@@ -713,6 +739,28 @@ mod tests {
     use super::*;
     use image::codecs::jpeg::JpegEncoder;
     use image::{ExtendedColorType, ImageEncoder};
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_and_leaves_no_temporary_behind() {
+        let dir = std::env::temp_dir().join(format!("matejko-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo.jpg");
+        fs::write(&path, b"old bytes").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        // A new file works too.
+        write_atomic(&dir.join("fresh.matejko_adj"), b"{}").unwrap();
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|name| !name.ends_with(".matejko-tmp")), "{names:?}");
+        assert_eq!(names.len(), 2, "{names:?}");
+        // A folder that is not there fails cleanly.
+        assert!(write_atomic(&dir.join("missing").join("x.jpg"), b"x").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn tagged_jpeg() -> Vec<u8> {
         let mut jpeg = Vec::new();
