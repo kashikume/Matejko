@@ -397,7 +397,7 @@ pub fn layout(
     let scale = scale.max(1.0);
     let x = window_w * (1.0 - split.clamp(0.18, 0.5));
     let top = 10.0 * scale;
-    let hist_h = 72.0 * scale;
+    let hist_h = 90.0 * scale;
     // Controls sit in from the divider, clear of its grip.
     let x0 = x + 18.0 * scale;
     let x1 = window_w - 12.0 * scale;
