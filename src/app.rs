@@ -6,7 +6,7 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use notify::RecommendedWatcher;
 use winit::application::ApplicationHandler;
@@ -19,7 +19,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CursorIcon, Fullscreen, Icon, Window};
 
 use crate::catalog::{is_video, Catalog, Refresh};
-use crate::decode::{DecodedImage, Decoder, PixelOrder, UserEvent};
+use crate::decode::{read_stamp, DecodedImage, Decoder, FileStamp, PixelOrder, UserEvent};
 use crate::edit::{
     clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, Align, EditWorker,
     Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
@@ -100,19 +100,6 @@ pub enum Action {
 const PAGE_STEP: isize = 10;
 const FOLDER_DEBOUNCE: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: SystemTime,
-}
-
-fn read_stamp(path: &Path) -> Option<FileStamp> {
-    let meta = fs::metadata(path).ok()?;
-    Some(FileStamp {
-        len: meta.len(),
-        modified: meta.modified().ok()?,
-    })
-}
 
 pub fn action_for(command: Command, mode: Mode, repeat: bool) -> Action {
     let nav_repeat = matches!(
@@ -907,13 +894,10 @@ impl App {
         }
         self.cache
             .retain(|path, _| relevant.iter().any(|kept| kept == path));
+        // A cached file's stamp is the one its decode read, set when the
+        // result arrives, so a later change to the file shows as stale.
         self.stamps
             .retain(|path, _| relevant.iter().any(|kept| kept == path));
-        for path in &relevant {
-            if let Some(stamp) = read_stamp(path) {
-                self.stamps.insert(path.clone(), stamp);
-            }
-        }
         if !is_video(&relevant[0]) {
             self.apply_current();
         }
@@ -2393,11 +2377,28 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::FolderDirty => self.note_folder_dirty(event_loop),
-            UserEvent::Decoded { path, result } => {
+            UserEvent::Decoded {
+                path,
+                stamp,
+                result,
+            } => {
                 self.in_flight.remove(&path);
                 if !self.is_relevant(&path) {
                     return;
                 }
+                // The file changed while it was being read, as when it is
+                // still being copied in. The pixels are of an older file:
+                // read it again. The folder event for that change may
+                // already have passed, so this cannot wait for one.
+                if read_stamp(&path) != stamp {
+                    let front = path == self.catalog.current_path();
+                    self.request_decode(path, front);
+                    return;
+                }
+                match stamp {
+                    Some(stamp) => self.stamps.insert(path.clone(), stamp),
+                    None => self.stamps.remove(&path),
+                };
                 match result {
                     Ok(image) => {
                         self.cache.insert(path, CacheEntry::Ready(image));

@@ -25,9 +25,26 @@ pub struct DecodedImage {
     pub order: PixelOrder,
 }
 
+/// A file's size and modified time: when either moves, the file changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+pub fn read_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok()?,
+    })
+}
+
 pub enum UserEvent {
     Decoded {
         path: PathBuf,
+        /// Read just before the file was, so it describes what was decoded.
+        stamp: Option<FileStamp>,
         result: Result<DecodedImage, String>,
     },
     /// The JPEG baseline for edit mode, decoded on this thread.
@@ -145,9 +162,14 @@ impl Decoder {
             .spawn(move || loop {
                 match thread_jobs.pop() {
                     Job::View(path) => {
+                        let stamp = read_stamp(&path);
                         let result = decode_file(&path, max_edge);
                         if proxy
-                            .send_event(UserEvent::Decoded { path, result })
+                            .send_event(UserEvent::Decoded {
+                                path,
+                                stamp,
+                                result,
+                            })
                             .is_err()
                         {
                             break;
