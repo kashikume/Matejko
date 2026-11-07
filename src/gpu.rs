@@ -303,12 +303,7 @@ impl Gpu {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vertices"),
-            size: (std::mem::size_of::<Vertex>() * 8192) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let vertices = vertex_buffer(&device, INITIAL_VERTICES);
         let white = white_texture(&device, &queue);
         let white_view = white.create_view(&wgpu::TextureViewDescriptor::default());
         let white_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -522,8 +517,11 @@ impl Gpu {
                 });
             }
         }
-        if vertices.len() > 8192 {
-            vertices.truncate(8192 / 6 * 6);
+        // The buffer grows to whatever a frame needs, so no shape is cut off.
+        let needed = (vertices.len() * std::mem::size_of::<Vertex>()) as u64;
+        if needed > self.vertices.size() {
+            let count = vertices.len().next_power_of_two();
+            self.vertices = vertex_buffer(&self.device, count);
         }
         let chrome_count = (vertices.len() as u32).saturating_sub(chrome_start);
         if !vertices.is_empty() {
@@ -1022,6 +1020,19 @@ fn push_triangle(
             color,
         });
     }
+}
+
+/// Room for the edit panel, its histogram, and the indicators in a usual
+/// frame. A frame that needs more grows the buffer.
+const INITIAL_VERTICES: usize = 8192;
+
+fn vertex_buffer(device: &wgpu::Device, count: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("vertices"),
+        size: (std::mem::size_of::<Vertex>() * count) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
