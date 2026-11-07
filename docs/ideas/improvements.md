@@ -27,15 +27,7 @@ Fix: a failed scan should keep the current list.
 
 ## Optimizations, roughly by payoff
 
-### 1. Upload textures without the padded copy
-
-[gpu.rs:1069](../../src/gpu.rs#L1069)
-
-`upload_rgba` pads each row to 256 bytes whenever the width isn't a multiple of 64 px, which needs a whole second copy of the image on the UI thread. `Queue::write_texture` doesn't need that alignment; only buffer-to-texture copies do. The copy is about 96 MB for a 6000 px wide photo and about 8 MB per frame for a portrait 1080×1920 video.
-
-Fix: always pass `bytes_per_row: Some(width * 4)`.
-
-### 2. Display photos with mipmaps
+### 1. Display photos with mipmaps
 
 [gpu.rs:383](../../src/gpu.rs#L383)
 
@@ -43,7 +35,7 @@ The texture has one mip level and the sampler is plain linear. A 24 MP photo fit
 
 Fix: generate a mip chain, either on the decode thread or with GPU blit passes, and set `mipmap_filter: Linear`.
 
-### 3. Reduce edit pipeline memory and passes
+### 2. Reduce edit pipeline memory and passes
 
 [pipeline.rs:316](../../src/edit/pipeline.rs#L316)
 
@@ -57,7 +49,7 @@ Peak use during a full render goes past 1 GB, and several GB for 50–60 MP file
 
 Fix: borrow the baseline instead of copying it (`Cow`), let `clarity` take `Image` by value and change it in place, and merge the pixel-by-pixel stages into one pass before and one after the shadow/highlight step.
 
-### 4. Cache `Warp::usable()`
+### 3. Cache `Warp::usable()`
 
 [pipeline.rs:1364](../../src/edit/pipeline.rs#L1364)
 
@@ -65,7 +57,7 @@ With keystone or distortion set, one call is 40 search steps × 32 bisections ×
 
 Fix: cache it on the warp's inputs.
 
-### 5. Encode to 8-bit without `powf`
+### 4. Encode to 8-bit without `powf`
 
 [image.rs:126](../../src/edit/image.rs#L126)
 
@@ -73,13 +65,13 @@ Fix: cache it on the warp's inputs.
 
 Fix: a table over linear values (for example 4096 entries with interpolation), which leaves room for the dither noise. `code_of` already does this for the histogram.
 
-### 6. Don't decode the JPEG a second time on E
+### 5. Don't decode the JPEG a second time on E
 
 [decode.rs:214](../../src/decode.rs#L214), [files.rs:431](../../src/edit/files.rs#L431)
 
 When there is no `.matejko` baseline yet, the baseline is the open file, which the viewer has already decoded to RGBA. Handing that to `Image::from_srgb_rgba` saves a full decode, several hundred milliseconds for a large photo.
 
-### 7. Small ones
+### 6. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move, allocating every label string each time.
 - `LabelShape` copies each label's text every frame before comparing it ([gpu.rs:765](../../src/gpu.rs#L765)). Compare first, copy only on a change.

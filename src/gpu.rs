@@ -1066,37 +1066,16 @@ fn white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     texture
 }
 
+/// Tightly packed rows go straight in. `write_texture`, unlike a copy from
+/// a buffer, takes any row pitch: wgpu lays the rows out in its own staging
+/// buffer, so padding them here would only copy the picture once more.
 fn upload_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, image: &DecodedImage) {
-    let tight = image.width * 4;
-    let aligned =
-        tight.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    if aligned == tight {
-        queue.write_texture(
-            copy_dst(texture),
-            &image.pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(tight),
-                rows_per_image: Some(image.height),
-            },
-            extent(image),
-        );
-        return;
-    }
-    let row_tight = tight as usize;
-    let row_aligned = aligned as usize;
-    let mut padded = vec![0u8; row_aligned * image.height as usize];
-    for row in 0..image.height as usize {
-        let from = row * row_tight;
-        let to = row * row_aligned;
-        padded[to..to + row_tight].copy_from_slice(&image.pixels[from..from + row_tight]);
-    }
     queue.write_texture(
         copy_dst(texture),
-        &padded,
+        &image.pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(aligned),
+            bytes_per_row: Some(image.width * 4),
             rows_per_image: Some(image.height),
         },
         extent(image),
