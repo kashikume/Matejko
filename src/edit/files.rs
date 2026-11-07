@@ -230,12 +230,16 @@ pub struct LoadedSession {
     pub adjustments: Adjustments,
     pub estimated_quality: u8,
     pub had_adj: bool,
+    /// Modified, created, and accessed times of the file the baseline bytes
+    /// came from. A baseline written into `.matejko` gets them, so the copy
+    /// of the camera file keeps the camera file's dates.
+    pub baseline_times: Option<fs::FileTimes>,
 }
 
 pub fn load_session(open: &Path) -> Result<LoadedSession, String> {
     let bytes = fs::read(open).map_err(|err| err.to_string())?;
     let mut paths = SessionPaths::for_open(open);
-    let (baseline_bytes, original_name) = if let Ok(adj_text) = fs::read_to_string(&paths.adj) {
+    let (baseline_bytes, original_name, baseline_source) = if let Ok(adj_text) = fs::read_to_string(&paths.adj) {
         let adj = AdjFile::parse(&adj_text)?;
         let baseline_path = open
             .parent()
@@ -245,15 +249,16 @@ pub fn load_session(open: &Path) -> Result<LoadedSession, String> {
         let baseline_bytes = fs::read(&baseline_path).map_err(|_| {
             "This version points at a baseline that is not in .matejko.".to_string()
         })?;
-        paths.baseline = baseline_path;
+        paths.baseline = baseline_path.clone();
         paths.original_name = adj.original.clone();
-        (baseline_bytes, Some(adj))
+        (baseline_bytes, Some(adj), baseline_path)
     } else if paths.baseline.is_file() {
         let baseline_bytes = fs::read(&paths.baseline).map_err(|err| err.to_string())?;
-        (baseline_bytes, None)
+        (baseline_bytes, None, paths.baseline.clone())
     } else {
-        (bytes.clone(), None)
+        (bytes.clone(), None, open.to_path_buf())
     };
+    let baseline_times = file_times(&baseline_source);
     let estimated_quality = estimate_jpeg_quality(&baseline_bytes).unwrap_or(90);
     let baseline = decode_jpeg_linear(&baseline_bytes)?;
     let (adjustments, had_adj) = if let Some(adj) = original_name {
@@ -268,7 +273,23 @@ pub fn load_session(open: &Path) -> Result<LoadedSession, String> {
         adjustments,
         estimated_quality,
         had_adj,
+        baseline_times,
     })
+}
+
+/// The times to give a copy of `path`. `None` when they cannot be read.
+fn file_times(path: &Path) -> Option<fs::FileTimes> {
+    use std::os::windows::fs::FileTimesExt;
+
+    let meta = fs::metadata(path).ok()?;
+    let mut times = fs::FileTimes::new().set_modified(meta.modified().ok()?);
+    if let Ok(accessed) = meta.accessed() {
+        times = times.set_accessed(accessed);
+    }
+    if let Ok(created) = meta.created() {
+        times = times.set_created(created);
+    }
+    Some(times)
 }
 
 pub fn save_over(session: &LoadedSession, adjustments: &Adjustments) -> Result<(), String> {
@@ -278,6 +299,7 @@ pub fn save_over(session: &LoadedSession, adjustments: &Adjustments) -> Result<(
         &session.paths.adj,
         &session.paths.original_name,
         &session.baseline_bytes,
+        session.baseline_times,
         &session.baseline,
         adjustments,
         session.estimated_quality,
@@ -302,7 +324,7 @@ pub fn save_copy(
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if !paths.baseline.exists() {
-        write_atomic(&paths.baseline, &session.baseline_bytes)?;
+        write_atomic_with_times(&paths.baseline, &session.baseline_bytes, session.baseline_times)?;
     }
     write_render(
         &paths.open,
@@ -310,6 +332,7 @@ pub fn save_copy(
         &paths.adj,
         &paths.original_name,
         &session.baseline_bytes,
+        session.baseline_times,
         &session.baseline,
         adjustments,
         session.estimated_quality,
@@ -323,6 +346,7 @@ fn write_render(
     adj_path: &Path,
     original_name: &str,
     baseline_bytes: &[u8],
+    baseline_times: Option<fs::FileTimes>,
     baseline: &Image,
     adjustments: &Adjustments,
     estimated_quality: u8,
@@ -331,7 +355,7 @@ fn write_render(
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if !baseline_path.exists() {
-        write_atomic(baseline_path, baseline_bytes)?;
+        write_atomic_with_times(baseline_path, baseline_bytes, baseline_times)?;
     }
     let rendered = if adjustments.is_identity(estimated_quality) {
         baseline_bytes.to_vec()
@@ -366,6 +390,16 @@ fn write_render(
 /// partly written photo. The temporary name ends in `.matejko-tmp`, which
 /// the browsing list does not show.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic_with_times(path, bytes, None)
+}
+
+/// `write_atomic`, and the file then carries `times` instead of the time of
+/// the write. They are set on the temporary file, and the rename keeps them.
+fn write_atomic_with_times(
+    path: &Path,
+    bytes: &[u8],
+    times: Option<fs::FileTimes>,
+) -> Result<(), String> {
     use std::io::Write;
 
     let name = path
@@ -376,6 +410,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let written = (|| {
         let mut file = fs::File::create(&temp)?;
         file.write_all(bytes)?;
+        if let Some(times) = times {
+            file.set_times(times)?;
+        }
         file.sync_all()?;
         drop(file);
         fs::rename(&temp, path)
@@ -865,6 +902,44 @@ mod tests {
         assert!(saved.get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY).is_some());
         let orientation = saved.get_field(exif::Tag::Orientation, exif::In::PRIMARY).unwrap();
         assert_eq!(orientation.value.get_uint(0), Some(1));
+    }
+
+    #[test]
+    fn the_baseline_keeps_the_camera_files_dates() {
+        use std::os::windows::fs::FileTimesExt;
+        use std::time::{Duration, SystemTime};
+
+        let dir = temp_dir("baseline-dates");
+        let path = dir.join("photo.jpg");
+        fs::write(&path, tagged_jpeg()).unwrap();
+        let taken = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(999_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(taken).set_created(created))
+            .unwrap();
+        let dates = |path: &Path| {
+            let meta = fs::metadata(path).unwrap();
+            (meta.modified().unwrap(), meta.created().unwrap())
+        };
+
+        let session = load_session(&path).unwrap();
+        let mut changed = session.adjustments.clone();
+        changed.exposure_ev = 0.5;
+        save_over(&session, &changed).unwrap();
+        assert_eq!(dates(&dir.join(".matejko").join("photo.jpg")), (taken, created));
+        // The saved photo is a new picture, written now.
+        assert_ne!(dates(&path).0, taken);
+
+        // A copy in another folder takes a baseline with the same dates.
+        let other = temp_dir("baseline-dates-other");
+        let reopened = load_session(&path).unwrap();
+        save_copy(&reopened, &other.join("photo.jpg"), &changed).unwrap();
+        assert_eq!(dates(&other.join(".matejko").join("photo.jpg")), (taken, created));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&other);
     }
 
     #[test]

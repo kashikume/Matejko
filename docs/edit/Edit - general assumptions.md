@@ -46,7 +46,7 @@ The session's original is the file name in the adj that was opened, when there i
 Save writes over the file that is open. It does this in order:
 
 1. If `.matejko` does not exist, create it.
-2. If the baseline does not exist, and the open file is the original, copy that file's bytes to `.matejko/<original>`. This happens before the render replaces the open file. A later save leaves the baseline where it is.
+2. If the baseline does not exist, and the open file is the original, copy that file's bytes to `.matejko/<original>`. The copy keeps the file's modified and created dates, so the baseline still carries the camera file's dates. This happens before the render replaces the open file. A later save leaves the baseline where it is.
 3. Write `.matejko/<stem of the open file>.matejko_adj` from the controls as they are now. Its `original` field is the original file name.
 4. Render the baseline plus that adj over the open file.
 
