@@ -11,7 +11,7 @@ use wgpu::CurrentSurfaceTexture;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::decode::DecodedImage;
+use crate::decode::{DecodedImage, PixelOrder};
 use crate::transport::Layout;
 
 /// Leading a "key\tdescription" row, draws that row greyed out.
@@ -44,6 +44,12 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(image_texture, image_sampler, in.uv) * in.color;
+}
+
+// A video frame's fourth byte is not alpha, so the frame is drawn opaque.
+@fragment
+fn fs_opaque(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(textureSample(image_texture, image_sampler, in.uv).rgb, 1.0) * in.color;
 }
 "#;
 
@@ -129,6 +135,8 @@ pub struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// `pipeline` with `fs_opaque`, for video frames.
+    opaque_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     bind_group_layout: wgpu::BindGroupLayout,
     vertices: wgpu::Buffer,
@@ -143,6 +151,7 @@ struct ImageTexture {
     bind: wgpu::BindGroup,
     width: u32,
     height: u32,
+    order: PixelOrder,
 }
 
 struct TextLayer {
@@ -249,39 +258,43 @@ impl Gpu {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("image"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Float32x4
-                    ],
-                })],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make_pipeline = |fragment: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fragment),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x2,
+                            1 => Float32x2,
+                            2 => Float32x4
+                        ],
+                    })],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline("fs_main");
+        let opaque_pipeline = make_pipeline("fs_opaque");
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("image"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -323,6 +336,7 @@ impl Gpu {
             queue,
             config,
             pipeline,
+            opaque_pipeline,
             sampler,
             bind_group_layout,
             vertices,
@@ -369,7 +383,10 @@ impl Gpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: match image.order {
+                PixelOrder::Rgba => wgpu::TextureFormat::Rgba8UnormSrgb,
+                PixelOrder::Bgrx => wgpu::TextureFormat::Bgra8UnormSrgb,
+            },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -394,6 +411,7 @@ impl Gpu {
             bind,
             width: image.width,
             height: image.height,
+            order: image.order,
         });
         Ok(())
     }
@@ -402,7 +420,10 @@ impl Gpu {
     /// frame does not reset zoom. A different size allocates a new texture.
     pub fn replace_pixels(&mut self, image: &DecodedImage) -> Result<(), String> {
         if let Some(existing) = &self.image {
-            if existing.width == image.width && existing.height == image.height {
+            if existing.width == image.width
+                && existing.height == image.height
+                && existing.order == image.order
+            {
                 upload_rgba(&self.queue, &existing.texture, image);
                 return Ok(());
             }
@@ -548,8 +569,12 @@ impl Gpu {
             }
             if image_count > 0 {
                 if let Some(image) = &self.image {
+                    if image.order == PixelOrder::Bgrx {
+                        pass.set_pipeline(&self.opaque_pipeline);
+                    }
                     pass.set_bind_group(0, &image.bind, &[]);
                     pass.draw(0..image_count, 0..1);
+                    pass.set_pipeline(&self.pipeline);
                 }
             }
             if chrome_count > 0 {
@@ -1046,7 +1071,7 @@ fn upload_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, image: &DecodedImag
     if aligned == tight {
         queue.write_texture(
             copy_dst(texture),
-            &image.rgba,
+            &image.pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(tight),
@@ -1062,7 +1087,7 @@ fn upload_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, image: &DecodedImag
     for row in 0..image.height as usize {
         let from = row * row_tight;
         let to = row * row_aligned;
-        padded[to..to + row_tight].copy_from_slice(&image.rgba[from..from + row_tight]);
+        padded[to..to + row_tight].copy_from_slice(&image.pixels[from..from + row_tight]);
     }
     queue.write_texture(
         copy_dst(texture),

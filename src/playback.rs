@@ -12,7 +12,7 @@ use std::time::Duration;
 use windows::core::Interface;
 use winit::event_loop::EventLoopProxy;
 
-use crate::decode::{DecodedImage, UserEvent};
+use crate::decode::{DecodedImage, PixelOrder, UserEvent};
 
 const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
 
@@ -36,6 +36,9 @@ struct Shared {
     generation: u64,
     max_edge: u32,
     frames: Mutex<Option<DecodedImage>>,
+    /// A frame buffer the UI has finished with, for the next frame to fill,
+    /// so playback does not allocate a frame's worth of memory each frame.
+    spare: Mutex<Option<Vec<u8>>>,
     copier: Mutex<Copier>,
     proxy: EventLoopProxy<UserEvent>,
     failed: AtomicBool,
@@ -98,6 +101,7 @@ impl VideoSession {
             generation,
             max_edge,
             frames: Mutex::new(None),
+            spare: Mutex::new(None),
             copier: Mutex::new(Copier {
                 device,
                 context,
@@ -228,6 +232,11 @@ impl VideoSession {
 
     pub fn take_frame(&self) -> Option<DecodedImage> {
         lock(&self.shared.frames).take()
+    }
+
+    /// Hands back the pixels of a frame that is on screen, to be reused.
+    pub fn recycle(&self, pixels: Vec<u8>) {
+        *lock(&self.shared.spare) = Some(pixels);
     }
 
     pub fn mark_ended(&mut self) {
@@ -368,7 +377,8 @@ fn on_frame(player: Option<&windows::Media::Playback::MediaPlayer>, shared: &Sha
         if !shared.alive.load(Ordering::Acquire) {
             return;
         }
-        match copier.copy(player, shared.max_edge) {
+        let buffer = lock(&shared.spare).take().unwrap_or_default();
+        match copier.copy(player, shared.max_edge, buffer) {
             Ok(None) => return,
             Ok(Some(image)) => image,
             Err(err) => {
@@ -382,7 +392,10 @@ fn on_frame(player: Option<&windows::Media::Playback::MediaPlayer>, shared: &Sha
             }
         }
     };
-    *lock(&shared.frames) = Some(image);
+    // A frame the UI never took is replaced, and its buffer kept.
+    if let Some(skipped) = lock(&shared.frames).replace(image) {
+        *lock(&shared.spare) = Some(skipped.pixels);
+    }
     let _ = shared.proxy.send_event(UserEvent::VideoFrame {
         generation: shared.generation,
     });
@@ -393,6 +406,7 @@ impl Copier {
         &mut self,
         player: &windows::Media::Playback::MediaPlayer,
         max_edge: u32,
+        buffer: Vec<u8>,
     ) -> Result<Option<DecodedImage>, String> {
         if self.surface.is_none() {
             let Some((width, height)) = presented_size(player)? else {
@@ -416,7 +430,7 @@ impl Copier {
                 .CopyFrameToVideoSurface(self.surface.as_ref().unwrap())
                 .map_err(|err| format!("Couldn't read a video frame. {err}"))?;
         }
-        self.read_rgba().map(Some)
+        self.read_frame(buffer).map(Some)
     }
 
     fn allocate(&mut self, width: u32, height: u32, max_edge: u32) -> Result<(), String> {
@@ -465,7 +479,7 @@ impl Copier {
         Ok(())
     }
 
-    fn read_rgba(&self) -> Result<DecodedImage, String> {
+    fn read_frame(&self, buffer: Vec<u8>) -> Result<DecodedImage, String> {
         let (width, height) = self.size.ok_or("This file has no video frames.")?;
         let target = self.target.as_ref().unwrap();
         let staging = self.staging.as_ref().unwrap();
@@ -482,7 +496,7 @@ impl Copier {
                     Some(&mut mapped),
                 )
                 .map_err(|err| format!("Couldn't read a video frame. {err}"))?;
-            let image = read_bgra(&mapped, width, height);
+            let image = read_bgra(&mapped, width, height, buffer);
             self.context.Unmap(staging, 0);
             image
         }
@@ -493,32 +507,39 @@ fn read_bgra(
     mapped: &windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE,
     width: u32,
     height: u32,
+    buffer: Vec<u8>,
 ) -> Result<DecodedImage, String> {
     let row_bytes = width as usize * 4;
     let pitch = mapped.RowPitch as usize;
-    if mapped.pData.is_null() || pitch < row_bytes {
+    if mapped.pData.is_null() || pitch < row_bytes || height == 0 {
         return Err("Couldn't read a video frame.".into());
     }
-    let mut rgba = vec![0u8; row_bytes * height as usize];
-    unsafe {
-        let src = mapped.pData as *const u8;
-        for y in 0..height as usize {
-            let row = std::slice::from_raw_parts(src.add(y * pitch), row_bytes);
-            let dest = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
-            for x in 0..width as usize {
-                let i = x * 4;
-                dest[i] = row[i + 2];
-                dest[i + 1] = row[i + 1];
-                dest[i + 2] = row[i];
-                dest[i + 3] = 255;
-            }
-        }
-    }
+    // The mapping holds `height` rows `pitch` apart. The last may stop at
+    // the pixels.
+    let mapped_len = pitch * (height as usize - 1) + row_bytes;
+    let source = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, mapped_len) };
     Ok(DecodedImage {
         width,
         height,
-        rgba,
+        pixels: copy_rows(source, pitch, row_bytes, height as usize, buffer),
+        order: PixelOrder::Bgrx,
     })
+}
+
+/// Packs `rows` rows of `row_bytes`, `pitch` apart in `source`, into
+/// `buffer`, reusing its memory. The bytes stay in their order: the GPU
+/// reads them as BGRA.
+fn copy_rows(source: &[u8], pitch: usize, row_bytes: usize, rows: usize, mut buffer: Vec<u8>) -> Vec<u8> {
+    buffer.clear();
+    if pitch == row_bytes {
+        buffer.extend_from_slice(&source[..row_bytes * rows]);
+    } else {
+        buffer.reserve(row_bytes * rows);
+        for row in source.chunks(pitch).take(rows) {
+            buffer.extend_from_slice(&row[..row_bytes]);
+        }
+    }
+    buffer
 }
 
 fn presented_size(
@@ -680,6 +701,18 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_rows_are_packed_without_their_padding() {
+        // Two rows of 2 pixels, 12 bytes apart: 8 bytes of pixels, 4 of padding.
+        let source: Vec<u8> = (0..20).collect();
+        let packed = copy_rows(&source, 12, 8, 2, Vec::with_capacity(64));
+        assert_eq!(packed, [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19]);
+        // A reused buffer keeps its memory and loses its old bytes.
+        let reused = copy_rows(&source[..16], 8, 8, 2, packed);
+        assert_eq!(reused, (0..16).collect::<Vec<u8>>());
+        assert!(reused.capacity() >= 64);
+    }
 
     #[test]
     fn file_uri_uses_forward_slashes_and_escapes_spaces() {

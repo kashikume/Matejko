@@ -1,12 +1,12 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that drops stale decodes from the queue.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that makes the video frame copy cheaper.
 
 ## Bugs
 
 ### 1. Pressing E can be lost: the decoder thread misses its wake-up
 
-[decode.rs:104](../../src/decode.rs#L104)
+[decode.rs:115](../../src/decode.rs#L115)
 
 `pop()` checks `edit` while holding the `queue` lock and then waits on `queue`. `request_edit` only takes the `edit` lock before calling `notify_one`. If E lands between that check and `wait()`, the wake-up is lost and the baseline doesn't load until some other decode arrives. The window is small but real.
 
@@ -29,7 +29,7 @@ Fix: have the decoder read the stamp before decoding and return it with the resu
 
 ### 3. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
-[app.rs:2629](../../src/app.rs#L2629)
+[app.rs:2634](../../src/app.rs#L2634)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
@@ -43,20 +43,20 @@ Fix: a failed scan should keep the current list.
 
 ### 5. A failed edit load shows its error on the wrong file
 
-[app.rs:2387](../../src/app.rs#L2387)
+[app.rs:2392](../../src/app.rs#L2392)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
 ### 6. Minor bugs
 
-- [decode.rs:190](../../src/decode.rs#L190): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
-- The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:502](../../src/gpu.rs#L502)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
+- [decode.rs:201](../../src/decode.rs#L201): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
+- The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:523](../../src/gpu.rs#L523)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
 
 ## Optimizations, roughly by payoff
 
 ### 1. Display photos with mipmaps
 
-[gpu.rs:369](../../src/gpu.rs#L369)
+[gpu.rs:383](../../src/gpu.rs#L383)
 
 The texture has one mip level and the sampler is plain linear. A 24 MP photo fit into a 1080p window is minified 4–6×, which gives visible aliasing and moiré.
 
@@ -81,15 +81,7 @@ With keystone or distortion set, one call is 40 search steps × 32 bisections ×
 
 Fix: cache it on the warp's inputs.
 
-### 4. Make the video frame copy cheaper
-
-[playback.rs:492](../../src/playback.rs#L492)
-
-Each frame does a synchronous `Map` right after `CopyResource` (a GPU stall), allocates a new frame-sized buffer (about 33 MB for 4K), and swaps BGRA to RGBA byte by byte.
-
-Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, reuse the buffer, and double-buffer the staging texture.
-
-### 5. Small ones
+### 4. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move.
 - `load_session` reads the whole photo even when an adj file or baseline means it isn't used ([files.rs:243](../../src/edit/files.rs#L243)).

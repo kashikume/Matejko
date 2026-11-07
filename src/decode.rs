@@ -8,10 +8,21 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 use winit::event_loop::EventLoopProxy;
 
+/// The byte order of `DecodedImage::pixels`, four bytes a pixel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelOrder {
+    #[default]
+    Rgba,
+    /// A video frame as Direct3D hands it over. The fourth byte is not
+    /// alpha and is not used.
+    Bgrx,
+}
+
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub pixels: Vec<u8>,
+    pub order: PixelOrder,
 }
 
 pub enum UserEvent {
@@ -215,7 +226,8 @@ pub fn decode_file(path: &Path, max_edge: u32) -> Result<DecodedImage, String> {
     Ok(DecodedImage {
         width,
         height,
-        rgba: pixels,
+        pixels,
+        order: PixelOrder::Rgba,
     })
 }
 
@@ -292,10 +304,10 @@ mod tests {
             (decoded.width, decoded.height),
             (1, 2),
             "pixels {:?}",
-            &decoded.rgba
+            &decoded.pixels
         );
-        let top = &decoded.rgba[0..3];
-        let bottom = &decoded.rgba[4..7];
+        let top = &decoded.pixels[0..3];
+        let bottom = &decoded.pixels[4..7];
         assert!(
             top[0] > top[1] + 40 && bottom[1] > bottom[0] + 40,
             "expected red above green, got top {top:?} bottom {bottom:?}"

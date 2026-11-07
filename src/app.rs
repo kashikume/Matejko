@@ -19,7 +19,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CursorIcon, Fullscreen, Icon, Window};
 
 use crate::catalog::{is_video, Catalog, Refresh};
-use crate::decode::{DecodedImage, Decoder, UserEvent};
+use crate::decode::{DecodedImage, Decoder, PixelOrder, UserEvent};
 use crate::edit::{
     clamp_frame_to_photo, drag_frame, hit_test, layout, Adjustments, Align, EditWorker,
     Frame as EditFrame, Guide, Handle, Hit as EditHit, Image as LinearImage, ImageControls,
@@ -1144,7 +1144,8 @@ impl App {
         let decoded = DecodedImage {
             width: rendered.width,
             height: rendered.height,
-            rgba: rendered.rgba,
+            pixels: rendered.rgba,
+            order: PixelOrder::Rgba,
         };
         let new_size = Vec2::new(decoded.width as f32, decoded.height as f32);
         if fit || self.view.fitted {
@@ -2047,6 +2048,10 @@ impl App {
         if let Some(err) = upload_error {
             self.fail_video(err);
             return;
+        }
+        // The frame is on the GPU. Its buffer takes the next one.
+        if let Some(video) = &self.video {
+            video.recycle(image.pixels);
         }
         let first = self.displayed.as_ref() != Some(&path) || self.shown_size != Some(size);
         if first {
