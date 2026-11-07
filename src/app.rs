@@ -457,6 +457,15 @@ impl App {
     fn title(&self) -> String {
         if self.welcome {
             "Matejko — right-click a photo and choose Open with".into()
+        } else if let Some(editing) = &self.editing {
+            let name = editing
+                .loaded
+                .paths
+                .open
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!("Matejko — Editing: {name}")
         } else {
             self.catalog.title()
         }
@@ -873,14 +882,10 @@ impl App {
     }
 
     fn apply_folder_changes(&mut self, event_loop: &ActiveEventLoop) {
-        if self.editing.is_some() && !self.catalog.is_empty() {
-            let path = self.catalog.current_path();
-            let _ = self.catalog.refresh();
-            if let Some(stamp) = read_stamp(&path) {
-                self.stamps.insert(path, stamp);
-            }
-            self.refresh_title();
-            self.request_redraw();
+        // The list stays as it was while editing, so the catalog keeps
+        // pointing at the open file even if it vanishes. Leaving edit mode
+        // rescans the folder.
+        if self.editing.is_some() {
             return;
         }
         let old_current = if self.catalog.is_empty() {
@@ -1066,6 +1071,7 @@ impl App {
             wheel_settle: None,
             scroll: 0.0,
         });
+        self.refresh_title();
         self.prompt = None;
         self.request_edit_render();
     }
@@ -1154,12 +1160,7 @@ impl App {
             (SaveTarget::Copy(path), Ok(())) => format!("Saved {}.", path.display()),
             (_, Err(err)) => err,
         });
-        if !self.catalog.is_empty() {
-            let path = self.catalog.current_path();
-            if let Some(stamp) = read_stamp(&path) {
-                self.stamps.insert(path, stamp);
-            }
-        }
+        // The open file is reloaded, and the folder rescanned, on leaving.
         self.request_redraw();
     }
 
@@ -1655,7 +1656,10 @@ impl App {
         self.displayed = None;
         self.shown_size = None;
         self.stamps.remove(&path);
-        self.sync_images();
+        // The folder was not rescanned while editing. Rescan now, before the
+        // next wait: `apply_folder_changes` reloads the file, moves on if it
+        // is gone, fixes the title, and quits if the folder is empty.
+        self.folder_dirty_until = Some(Instant::now());
         self.request_redraw();
     }
 

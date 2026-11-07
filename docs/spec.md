@@ -37,6 +37,7 @@ The app watches the image's parent directory (not recursive) for changes made ou
 - When a supported file appears or disappears, the browse list is rebuilt. The viewer stays on the same path when that file still exists.
 - When the current file's contents change (size or modified time), it is decoded again and shown fitted. A write during edit mode does not reload the session. The picture on screen stays the edit, and leaving edit mode shows the file as it is on disk.
 - When the current file is removed or renamed away, navigation matches an in-app delete: show the next image, or the previous if it was last, or exit if none remain.
+- During edit mode the browse list is not rebuilt, so the session and the title stay on the open file even if it is removed. Leaving edit mode rescans the folder and applies the rules above: the file is shown again if it is still there, the next one if it is gone, and the app exits if no supported file remains.
 - Folder events are coalesced for about 100 ms so a single save does not thrash. If the watcher cannot start, the app still runs without live updates.
 
 ### Window
@@ -70,7 +71,7 @@ Alphabetical means the file name only, compared with case-insensitive ordinal or
 
 - The app starts windowed, centered, using about 80% of the work area on the monitor that contains the window. The window and the `.exe` use the Matejko painter icon.
 - The background is black. PNG transparency is composited onto black.
-- The title bar shows `Matejko — name.jpg (3 / 40) — F1 for help`. During normal viewing of a photo there is no other overlay. A video may show a bar along the bottom.
+- The title bar shows `Matejko — name.jpg (3 / 40) — F1 for help`. In edit mode it shows `Matejko — Editing: name.jpg`. During normal viewing of a photo there is no other overlay. A video may show a bar along the bottom.
 - The window is resizable and has the usual minimize, maximize, and close controls. Close and Alt+F4 quit immediately, including during help or delete confirmation.
 - Fullscreen is borderless on the monitor that contains the window. The title bar is not visible there, so the file name is hidden until the user leaves fullscreen.
 - In fullscreen the pointer hides as soon as fullscreen starts. Moving it, turning the wheel, or pressing a button shows it for 3 seconds after the last use, then it hides again. A pointer message sent because the window changed size under a still pointer does not count as a move. Leaving fullscreen shows it and leaves it visible.

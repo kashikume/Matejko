@@ -57,23 +57,13 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 7. Edit mode doesn't handle the open file being removed from outside
-
-[app.rs:863](../../src/app.rs#L863)
-
-`catalog.refresh()` moves the index to another file while the edit session stays on the old one. After that:
-
-- the title and the `displayed` path name the wrong file;
-- `finish_edit_save` and `leave_edit` update the stamp and cache of that other file;
-- if the folder ends up empty, `leave_edit` returns early and leaves a black window that never closes.
-
-### 8. A failed edit load shows its error on the wrong file
+### 7. A failed edit load shows its error on the wrong file
 
 [app.rs:2311](../../src/app.rs#L2311)
 
 The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
 
-### 9. Minor bugs
+### 8. Minor bugs
 
 - [decode.rs:324](../../src/decode.rs#L324): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:502](../../src/gpu.rs#L502)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.
