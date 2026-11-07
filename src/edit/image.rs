@@ -20,13 +20,20 @@ impl Image {
         image
     }
 
+    /// `rgba` holds `width × height` pixels. Alpha is ignored.
     pub fn from_srgb_rgba(width: u32, height: u32, rgba: &[u8]) -> Self {
-        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-        for px in rgba.chunks_exact(4) {
-            rgb.push(decode(px[0] as f32 / 255.0));
-            rgb.push(decode(px[1] as f32 / 255.0));
-            rgb.push(decode(px[2] as f32 / 255.0));
-        }
+        const PIXELS: usize = CHUNK / 3;
+        let table = decode_table();
+        let mut rgb = vec![0.0; (width as usize) * (height as usize) * 3];
+        rgb.par_chunks_mut(CHUNK)
+            .zip(rgba.par_chunks(PIXELS * 4))
+            .for_each(|(out, src)| {
+                for (dst, px) in out.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
+                    dst[0] = table[px[0] as usize];
+                    dst[1] = table[px[1] as usize];
+                    dst[2] = table[px[2] as usize];
+                }
+            });
         Self { width, height, rgb }
     }
 
@@ -144,7 +151,7 @@ impl Image {
                 for x in x0..x1 {
                     let px = self.pixel(x, y);
                     for (channel, bin) in px.iter().zip(bins.iter_mut()) {
-                        bin[quantize(*channel, 0.0) as usize] += 1;
+                        bin[code_of(*channel)] += 1;
                     }
                 }
                 bins
@@ -184,6 +191,64 @@ pub fn encode(l: f32) -> f32 {
     }
 }
 
+/// The linear value of each 8-bit sRGB code.
+fn decode_table() -> &'static [f32; 256] {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|code| decode(code as f32 / 255.0)))
+}
+
+/// `thresholds[c]` is the smallest linear value `quantize(_, 0.0)` puts
+/// above code `c`. Found by bisecting on the float's bits, so it matches
+/// `quantize` exactly, rounding and all.
+fn code_thresholds() -> &'static [f32; 255] {
+    static TABLE: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|code| {
+            // Positive floats sort like their bits.
+            let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if quantize(f32::from_bits(mid), 0.0) as usize > code {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            f32::from_bits(hi)
+        })
+    })
+}
+
+/// Buckets over linear 0…1 for `code_of`. The steepest part of the sRGB
+/// curve, at black, has 12.92 × 255 ≈ 3294 codes per unit, fewer than the
+/// buckets, so a bucket never spans more than one code boundary.
+const CODE_BUCKETS: usize = 4096;
+
+/// The code at the start of each bucket.
+fn bucket_codes() -> &'static [u8; CODE_BUCKETS] {
+    static TABLE: std::sync::OnceLock<[u8; CODE_BUCKETS]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let thresholds = code_thresholds();
+        std::array::from_fn(|bucket| {
+            let start = bucket as f32 / CODE_BUCKETS as f32;
+            thresholds.partition_point(|threshold| *threshold <= start) as u8
+        })
+    })
+}
+
+/// `quantize(linear, 0.0)` without the `powf`: a table read, then a step
+/// past each code boundary inside the bucket.
+fn code_of(linear: f32) -> usize {
+    let thresholds = code_thresholds();
+    // A negative or NaN value lands in bucket 0, and above 1 in the last.
+    let bucket = ((linear * CODE_BUCKETS as f32) as usize).min(CODE_BUCKETS - 1);
+    let mut code = bucket_codes()[bucket] as usize;
+    while code < thresholds.len() && linear >= thresholds[code] {
+        code += 1;
+    }
+    code
+}
+
 pub fn quantize(linear: f32, noise: f32) -> u8 {
     let encoded = encode(linear.clamp(0.0, 1.0)).clamp(0.0, 1.0);
     let code = (encoded * 255.0 + noise).round();
@@ -202,4 +267,37 @@ fn hash(n: usize) -> f32 {
     let mut x = n.wrapping_mul(0x9E3779B1) ^ 0xA5A5A5A5;
     x ^= x >> 16;
     (x & 0xFFFF) as f32 / 65535.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_decode_table_is_decode() {
+        let rgba: Vec<u8> = (0..=255u8).flat_map(|c| [c, c, c, 9]).collect();
+        let image = Image::from_srgb_rgba(256, 1, &rgba);
+        for code in 0..256 {
+            assert_eq!(image.rgb[code * 3], decode(code as f32 / 255.0), "code {code}");
+        }
+    }
+
+    #[test]
+    fn code_of_matches_quantize_everywhere() {
+        // Every threshold and its neighbours, where rounding decides.
+        for threshold in code_thresholds() {
+            let bits = threshold.to_bits();
+            for v in [bits - 1, bits, bits + 1].map(f32::from_bits) {
+                assert_eq!(code_of(v), quantize(v, 0.0) as usize, "at {v}");
+            }
+        }
+        // A dense sweep, and values outside 0 to 1.
+        for i in 0..=200_000 {
+            let v = i as f32 / 200_000.0;
+            assert_eq!(code_of(v), quantize(v, 0.0) as usize, "at {v}");
+        }
+        for v in [-1.0, -0.0, 1.0, 1.5, f32::INFINITY, f32::NAN] {
+            assert_eq!(code_of(v), quantize(v, 0.0) as usize, "at {v}");
+        }
+    }
 }

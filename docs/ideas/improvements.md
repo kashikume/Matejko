@@ -78,14 +78,7 @@ The texture has one mip level and the sampler is plain linear. A 24 MP photo fit
 
 Fix: generate a mip chain, either on the decode thread or with GPU blit passes, and set `mipmap_filter: Linear`.
 
-### 3. Use lookup tables instead of `powf` in edit-mode colour conversion
-
-[image.rs:23](../../src/edit/image.rs#L23)
-
-- `from_srgb_rgba` runs `powf` three times per pixel on one thread: about 72M calls for 24 MP, and the main cost of opening edit mode. A 256-entry table, run in parallel, makes it nearly free.
-- `histogram_region` ([image.rs:137](../../src/edit/image.rs#L137)) calls `quantize` (another `powf`) per channel over the whole full-size render. Build the histogram from the RGBA bytes already produced, or from the drag-size image.
-
-### 4. Reduce edit pipeline memory
+### 3. Reduce edit pipeline memory
 
 For a 24 MP photo the baseline in f32 is about 288 MB.
 
@@ -96,7 +89,7 @@ Peak use during a full render goes past 1 GB, and several GB for 50–60 MP file
 
 Fix: borrow the baseline instead of copying it (`Cow`), let `clarity` take `Image` by value and change it in place, and merge the pixel-by-pixel stages (white balance, exposure, blackpoint) into one pass.
 
-### 5. Cache `Warp::usable()`
+### 4. Cache `Warp::usable()`
 
 [pipeline.rs:1364](../../src/edit/pipeline.rs#L1364)
 
@@ -104,7 +97,7 @@ With keystone or distortion set, one call is 40 search steps × 32 bisections ×
 
 Fix: cache it on the warp's inputs.
 
-### 6. Make the video frame copy cheaper
+### 5. Make the video frame copy cheaper
 
 [playback.rs:492](../../src/playback.rs#L492)
 
@@ -112,7 +105,7 @@ Each frame does a synchronous `Map` right after `CopyResource` (a GPU stall), al
 
 Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, reuse the buffer, and double-buffer the staging texture.
 
-### 7. Build the Info and Help text once
+### 6. Build the Info and Help text once
 
 [app.rs:1894](../../src/app.rs#L1894)
 
@@ -120,7 +113,7 @@ Fix: use a `Bgra8UnormSrgb` wgpu texture for video so rows are a plain memcpy, r
 
 Fix: build the text when the overlay opens.
 
-### 8. Small ones
+### 7. Small ones
 
 - `edit_panel()` lays out the whole panel 3–4 times per redraw and per mouse move.
 - `load_session` reads the whole photo even when an adj file or baseline means it isn't used ([files.rs:236](../../src/edit/files.rs#L236)).
