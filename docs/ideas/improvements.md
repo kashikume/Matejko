@@ -4,23 +4,7 @@ Status: findings from read-throughs of all of `src/` on 2026-11-07. Items are re
 
 ## Bugs
 
-### 1. A second E while the baseline loads replaces the session
-
-[app.rs:1061](../../src/app.rs#L1061)
-
-The mode stays Viewing until the baseline arrives, so a second E on a large JPEG queues a second load. `accept_baseline` doesn't check for an open session. When the second result arrives, it replaces the session and its worker, and any slider moves made in between are lost.
-
-Fix: return early when `self.editing.is_some()`.
-
-### 2. Pressing E can be lost: the decoder thread misses its wake-up
-
-[decode.rs:132](../../src/decode.rs#L132)
-
-`pop()` checks `edit` while holding the `queue` lock and then waits on `queue`. `request_edit` only takes the `edit` lock before calling `notify_one`. If E lands between that check and `wait()`, the wake-up is lost and the baseline doesn't load until some other decode arrives. The window is small but real.
-
-Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
-
-### 3. Losing focus mid-drag leaves the drag running
+### 1. Losing focus mid-drag leaves the drag running
 
 [app.rs:2476](../../src/app.rs#L2476)
 
@@ -28,7 +12,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 Fix: call `edit_release()` and clear `seeking` there.
 
-### 4. A brief folder read error closes the app
+### 2. A brief folder read error closes the app
 
 [catalog.rs:94](../../src/catalog.rs#L94) → [app.rs:927](../../src/app.rs#L927)
 
@@ -36,7 +20,7 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 5. Minor bugs
+### 3. Minor bugs
 
 - In edit mode, a window resize refits the picture to the whole window instead of `picture_window()`, so a fitted picture slides under the panel ([app.rs:2241](../../src/app.rs#L2241)). Dragging the divider doesn't refit at all ([app.rs:1525](../../src/app.rs#L1525)). The next render puts it right.
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.

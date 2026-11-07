@@ -80,46 +80,56 @@ pub struct EditBaseline {
     pub drag: crate::edit::Image,
 }
 
+/// The waiting work. The edit request shares the queue's lock, so a request
+/// can never land between the thread's last look and its wait.
+#[derive(Default)]
+struct Waiting {
+    queue: std::collections::VecDeque<PathBuf>,
+    edit: Option<PathBuf>,
+}
+
 struct Jobs {
-    queue: Mutex<std::collections::VecDeque<PathBuf>>,
-    edit: Mutex<Option<PathBuf>>,
+    waiting: Mutex<Waiting>,
     ready: Condvar,
 }
 
 impl Jobs {
     fn new() -> Self {
         Self {
-            queue: Mutex::new(std::collections::VecDeque::new()),
-            edit: Mutex::new(None),
+            waiting: Mutex::new(Waiting::default()),
             ready: Condvar::new(),
         }
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, Waiting> {
+        self.waiting.lock().expect("decode queue")
+    }
+
     fn enqueue(&self, path: PathBuf, front: bool) {
-        let mut queue = self.queue.lock().expect("decode queue");
-        queue.retain(|queued| queued != &path);
+        let mut waiting = self.lock();
+        waiting.queue.retain(|queued| queued != &path);
         if front {
-            queue.push_front(path);
+            waiting.queue.push_front(path);
         } else {
-            queue.push_back(path);
+            waiting.queue.push_back(path);
         }
         self.ready.notify_one();
     }
 
     fn promote(&self, path: &Path) {
-        let mut queue = self.queue.lock().expect("decode queue");
-        if let Some(index) = queue.iter().position(|queued| queued == path) {
-            let path = queue.remove(index).expect("queued path");
-            queue.push_front(path);
+        let mut waiting = self.lock();
+        if let Some(index) = waiting.queue.iter().position(|queued| queued == path) {
+            let path = waiting.queue.remove(index).expect("queued path");
+            waiting.queue.push_front(path);
         }
     }
 
     /// Drops every waiting decode not in `keep`, and returns the paths it
     /// dropped. The decode already running finishes.
     fn retain(&self, keep: &[PathBuf]) -> Vec<PathBuf> {
-        let mut queue = self.queue.lock().expect("decode queue");
+        let mut waiting = self.lock();
         let mut dropped = Vec::new();
-        queue.retain(|queued| {
+        waiting.queue.retain(|queued| {
             let kept = keep.contains(queued);
             if !kept {
                 dropped.push(queued.clone());
@@ -130,20 +140,20 @@ impl Jobs {
     }
 
     fn request_edit(&self, path: PathBuf) {
-        *self.edit.lock().expect("edit queue") = Some(path);
+        self.lock().edit = Some(path);
         self.ready.notify_one();
     }
 
     fn pop(&self) -> Job {
-        let mut queue = self.queue.lock().expect("decode queue");
+        let mut waiting = self.lock();
         loop {
-            if let Some(path) = self.edit.lock().expect("edit queue").take() {
+            if let Some(path) = waiting.edit.take() {
                 return Job::Edit(path);
             }
-            if let Some(path) = queue.pop_front() {
+            if let Some(path) = waiting.queue.pop_front() {
                 return Job::View(path);
             }
-            queue = self.ready.wait(queue).expect("decode queue");
+            waiting = self.ready.wait(waiting).expect("decode queue");
         }
     }
 }
@@ -312,7 +322,25 @@ mod tests {
         let dropped = jobs.retain(&[PathBuf::from("c.jpg"), PathBuf::from("x.jpg")]);
         assert_eq!(dropped, ["a.jpg", "b.jpg", "d.jpg"].map(PathBuf::from));
         assert!(matches!(jobs.pop(), Job::View(path) if path == Path::new("c.jpg")));
-        assert!(jobs.queue.lock().unwrap().is_empty());
+        assert!(jobs.lock().queue.is_empty());
+    }
+
+    #[test]
+    fn an_edit_request_wakes_a_waiting_thread_and_goes_first() {
+        let jobs = std::sync::Arc::new(Jobs::new());
+        jobs.enqueue(PathBuf::from("view.jpg"), false);
+        jobs.request_edit(PathBuf::from("edit.jpg"));
+        assert!(matches!(jobs.pop(), Job::Edit(path) if path == Path::new("edit.jpg")));
+        assert!(matches!(jobs.pop(), Job::View(path) if path == Path::new("view.jpg")));
+
+        // A thread already waiting on an empty queue is woken by the request.
+        let waiter = {
+            let jobs = jobs.clone();
+            thread::spawn(move || matches!(jobs.pop(), Job::Edit(_)))
+        };
+        thread::sleep(std::time::Duration::from_millis(50));
+        jobs.request_edit(PathBuf::from("later.jpg"));
+        assert!(waiter.join().unwrap());
     }
 
     #[test]

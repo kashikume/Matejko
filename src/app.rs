@@ -386,6 +386,9 @@ pub struct App {
     folder_dirty_until: Option<Instant>,
     _watcher: Option<RecommendedWatcher>,
     editing: Option<Editing>,
+    /// The file whose edit baseline has been asked for and not yet come
+    /// back. Another E on it waits for that one instead of asking again.
+    edit_requested: Option<PathBuf>,
     shift_down: bool,
     ctrl_down: bool,
     cursor_icon: CursorIcon,
@@ -439,6 +442,7 @@ impl App {
             folder_dirty_until: None,
             _watcher: None,
             editing: None,
+            edit_requested: None,
             shift_down: false,
             ctrl_down: false,
             cursor_icon: CursorIcon::Default,
@@ -1050,16 +1054,27 @@ impl App {
             return;
         }
         let path = self.catalog.current_path();
-        if !is_jpeg(&path) {
+        if !is_jpeg(&path) || self.edit_requested.as_ref() == Some(&path) {
             return;
         }
         if let Some(decoder) = &self.decoder {
+            self.edit_requested = Some(path.clone());
             decoder.request_edit(path);
         }
     }
 
+    /// A baseline is wanted only when it answers the latest E, the file is
+    /// still the one open, and no session is open already.
+    fn baseline_wanted(&mut self, path: &Path) -> bool {
+        if self.edit_requested.as_deref() != Some(path) {
+            return false;
+        }
+        self.edit_requested = None;
+        self.editing.is_none() && !self.catalog.is_empty() && self.catalog.current_path() == path
+    }
+
     fn accept_baseline(&mut self, path: PathBuf, baseline: crate::decode::EditBaseline) {
-        if self.catalog.is_empty() || self.catalog.current_path() != path {
+        if !self.baseline_wanted(&path) {
             return;
         }
         let saved = baseline.loaded.adjustments.clone();
@@ -2416,7 +2431,7 @@ impl ApplicationHandler<UserEvent> for App {
                 Ok(baseline) => self.accept_baseline(path, baseline),
                 // Like a success, a failure counts only for the file still open.
                 Err(err) => {
-                    if !self.catalog.is_empty() && self.catalog.current_path() == path {
+                    if self.baseline_wanted(&path) {
                         self.decode_error = Some(err);
                         self.request_redraw();
                     }
