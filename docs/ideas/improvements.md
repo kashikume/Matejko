@@ -1,6 +1,6 @@
 # Code review: bugs and optimizations
 
-Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that re-reads a file that changed while it was decoded.
+Status: findings from a read-through of all of `src/` on 2026-11-07. Items are removed from this list as they are fixed; everything still here is open. The project was not built and the tests were not run for the review. Line numbers were last checked against the commit that ignores a failed edit load of a file no longer open.
 
 ## Bugs
 
@@ -14,7 +14,7 @@ Fix: take the `queue` lock in `request_edit`, or keep both in one mutex.
 
 ### 2. "Of" / "Sf" draw the frame in the wrong place when keystone or lens correction is set
 
-[app.rs:2657](../../src/app.rs#L2657)
+[app.rs:2660](../../src/app.rs#L2660)
 
 `copy_geometry` copies the turn, mirrors, rotation, aspect and frame, but not `vertical`, `horizontal` or `distortion`. The frame is stored as fractions of the usable rectangle, which depends on those three. The spec ("this rotation and frame") was written before keystone existed. Copying those three fields is almost certainly what's intended.
 
@@ -26,13 +26,7 @@ If `scan_dir` fails (network share hiccup, folder briefly locked), the list is c
 
 Fix: a failed scan should keep the current list.
 
-### 4. A failed edit load shows its error on the wrong file
-
-[app.rs:2415](../../src/app.rs#L2415)
-
-The `BaselineReady` error branch doesn't check `path` against the current file, unlike the success branch. If you navigate away first, the error appears on the next file.
-
-### 5. Minor bugs
+### 4. Minor bugs
 
 - [decode.rs:223](../../src/decode.rs#L223): `ImageReader::open` guesses the format from the extension, so a PNG named `.jpg` fails. `.with_guessed_format()` fixes this; edit mode already uses it.
 - The vertex buffer holds 8192 vertices and silently cuts off anything past that ([gpu.rs:523](../../src/gpu.rs#L523)). The edit panel is already around 5–6k (the histogram alone is 4,608), so a few more overlay quads would start dropping.

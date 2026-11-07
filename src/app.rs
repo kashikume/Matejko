@@ -2414,9 +2414,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::BaselineReady { path, result } => match result {
                 Ok(baseline) => self.accept_baseline(path, baseline),
+                // Like a success, a failure counts only for the file still open.
                 Err(err) => {
-                    self.decode_error = Some(err);
-                    self.request_redraw();
+                    if !self.catalog.is_empty() && self.catalog.current_path() == path {
+                        self.decode_error = Some(err);
+                        self.request_redraw();
+                    }
                 }
             },
             UserEvent::Edit(WorkerEvent::Rendered(rendered)) => self.show_edit_render(rendered),
