@@ -13,7 +13,10 @@ use crate::edit::image::{decode, Image};
 use crate::edit::pipeline::{Adjustments, Aspect, Frame};
 
 const VERSION: u32 = 1;
-const SOFTWARE_NOTE: &str = "edited with Matejko";
+/// Appended to the EXIF Software tag of a re-encoded photo.
+const SOFTWARE_NOTE: &str = concat!("edited with Matejko ", env!("CARGO_PKG_VERSION"));
+/// A Software tag that already holds this, from any version, is left alone.
+const SOFTWARE_NAME: &str = "edited with Matejko";
 
 #[derive(Debug)]
 pub struct SessionPaths {
@@ -742,7 +745,7 @@ fn software_value(buf: &[u8], tiff: usize, at: usize, typ: u16, count: u32, le: 
         &buf[start..end]
     };
     let text = String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string();
-    if text.contains(SOFTWARE_NOTE) {
+    if text.contains(SOFTWARE_NAME) {
         text
     } else if text.is_empty() {
         SOFTWARE_NOTE.into()
@@ -1154,7 +1157,7 @@ mod tests {
             .unwrap()
             .display_value()
             .to_string();
-        assert!(software.contains("edited with Matejko"), "{software}");
+        assert!(software.contains(&format!("TestCam, edited with Matejko {}", env!("CARGO_PKG_VERSION"))), "{software}");
         assert!(exif.get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY).is_some());
         let _ = fs::remove_dir_all(&dir);
     }

@@ -240,7 +240,7 @@ A JPEG does not store that 1…100 integer. It stores quantization tables. The i
 
 A render where every image control is at default, both mirrors are off, `quarter_turns` is 0, `rotation` is 0, the frame is the whole picture, and `jpeg_quality` is still that starting factor copies the baseline JPEG bytes and does not run this quantize. Re-encoding an untouched phone JPEG would lose more than the pipeline had changed. A different quality, with the image controls still at default, does encode: the user asked for a different file. Encoding uses the IJG tables for the chosen factor. A phone's own tables survive only in that byte copy.
 
-A rendered JPEG carries the baseline's EXIF. The orientation tag is normal, because the pixels are already upright, and the pixel-size tags match the written image. Every other tag stays, including the taken time, the camera, and GPS. The Software tag keeps its existing text. `edited with Matejko` is added to it, once. A file whose Software tag is empty gets that phrase alone. The byte-copy path leaves the baseline EXIF untouched, because that file was not re-encoded.
+A rendered JPEG carries the baseline's EXIF. The orientation tag is normal, because the pixels are already upright, and the pixel-size tags match the written image. Every other tag stays, including the taken time, the camera, and GPS. The Software tag keeps its existing text. `edited with Matejko <version>`, for example `edited with Matejko 0.2.0`, is added to it, once: a tag that already says `edited with Matejko`, from any version, is left as it is. A file whose Software tag is empty gets that phrase alone. The byte-copy path leaves the baseline EXIF untouched, because that file was not re-encoded.
 
 ## Histogram
 
